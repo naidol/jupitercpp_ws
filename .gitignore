@@ -5,3 +5,24 @@ log/
 __pycache__/
 .vscode/
 *.bag
+
+# Large external repos — built locally
+llama.cpp/
+piper_tts/
+whisper.cpp/
+
+# ONNX models and TensorRT engine cache
+models/
+
+# Personal data — user profiles and conversation history
+memory/
+
+# Temporary audio/vision files
+temp_*.wav
+temp_response.txt
+
+# Misc workspace artifacts
+archive/
+frames_*.gv
+frames_*.pdf
+jupiter_talk.sh

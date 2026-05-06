@@ -13,6 +13,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Exec
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -80,24 +81,60 @@ def generate_launch_description():
             ),
         ]),
 
-        # ── Perception layer (TODO) ───────────────────────────────────────────
-        # Vision node (face detection, object recognition via TensorRT)
-        # Uncomment when jupiter_nodes vision is implemented:
-        # Node(
-        #     package='jupiter_nodes',
-        #     executable='vision',
-        #     name='vision',
-        #     output='screen',
-        # ),
+        # ── Perception layer ──────────────────────────────────────────────────
 
-        # ── Voice layer (TODO) ────────────────────────────────────────────────
-        # Whisper ASR + Piper TTS + llama.cpp brain
-        # Uncomment when voice pipeline is integrated into ROS2:
-        # Node(
-        #     package='jupiter_nodes',
-        #     executable='voice',
-        #     name='voice',
-        #     output='screen',
-        # ),
+        # Orbbec Gemini 336 camera — delayed 4s so ROS2 graph is ready
+        TimerAction(period=4.0, actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        get_package_share_directory('orbbec_camera'),
+                        'launch', 'gemini_330_series.launch.py'
+                    )
+                ),
+            ),
+        ]),
+
+        # Face recognition — delayed 6s so camera is publishing before we subscribe
+        TimerAction(period=6.0, actions=[
+            Node(
+                package='jupiter_nodes',
+                executable='jupiter_face_recognition',
+                name='jupiter_face_recognition',
+                output='screen',
+            ),
+        ]),
+
+        # AprilTag + depth vision node
+        TimerAction(period=6.0, actions=[
+            Node(
+                package='jupiter_nodes',
+                executable='jupiter_vision',
+                name='jupiter_vision',
+                output='screen',
+            ),
+        ]),
+
+        # ── Voice + Brain layer ───────────────────────────────────────────────
+
+        # Whisper ASR + Piper TTS
+        TimerAction(period=5.0, actions=[
+            Node(
+                package='jupiter_nodes',
+                executable='jupiter_voice',
+                name='jupiter_voice',
+                output='screen',
+            ),
+        ]),
+
+        # LLM brain (requires Ollama already running: ollama serve)
+        TimerAction(period=5.0, actions=[
+            Node(
+                package='jupiter_nodes',
+                executable='jupiter_brain',
+                name='jupiter_brain',
+                output='screen',
+            ),
+        ]),
 
     ])

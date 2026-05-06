@@ -42,6 +42,7 @@ add_executable(jupiter_vision src/vision.cpp)
 add_executable(imu_covariance_fixer src/imu_covariance_fixer.cpp)
 add_executable(jupiter_voice src/voice.cpp)
 add_executable(jupiter_brain src/brain.cpp)
+add_executable(jupiter_face_recognition src/face_recognition.cpp)
 
 # Link ROS2 dependencies
 ament_target_dependencies(jupiter_vision
@@ -65,6 +66,13 @@ ament_target_dependencies(jupiter_voice
 ament_target_dependencies(jupiter_brain
   rclcpp
   std_msgs
+)
+
+ament_target_dependencies(jupiter_face_recognition
+  rclcpp
+  sensor_msgs
+  std_msgs
+  cv_bridge
 )
 
 # Link Hardware libraries
@@ -95,11 +103,27 @@ target_link_libraries(jupiter_brain
   nlohmann_json::nlohmann_json
 )
 
+target_include_directories(jupiter_face_recognition PRIVATE
+  ${OpenCV_INCLUDE_DIRS}
+  ${cv_bridge_INCLUDE_DIRS}
+  /usr/include/aarch64-linux-gnu                              # NvInfer.h, NvOnnxParser.h
+  /usr/local/cuda-13.0/targets/sbsa-linux/include            # cuda_runtime_api.h
+)
+
+target_link_libraries(jupiter_face_recognition
+  ${OpenCV_LIBS}
+  nlohmann_json::nlohmann_json
+  nvinfer
+  nvonnxparser
+  /usr/local/cuda-13.0/targets/sbsa-linux/lib/libcudart.so
+)
+
 install(TARGETS
   jupiter_vision
   imu_covariance_fixer
   jupiter_voice
   jupiter_brain
+  jupiter_face_recognition
   DESTINATION lib/${PROJECT_NAME}
 )
 
