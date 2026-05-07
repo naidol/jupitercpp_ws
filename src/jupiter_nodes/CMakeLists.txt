@@ -89,7 +89,6 @@ target_include_directories(jupiter_voice PRIVATE
 
 target_link_libraries(jupiter_voice
   ${WHISPER_LIB}
-  asound
 )
 
 # Embed RPATH so jupiter_voice finds libwhisper.so at runtime without LD_LIBRARY_PATH

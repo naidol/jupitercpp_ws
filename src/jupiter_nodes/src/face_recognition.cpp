@@ -267,6 +267,7 @@ private:
         declare_parameter("snapshot_path",   std::string("/tmp/jupiter_view.jpg"));
         declare_parameter("match_threshold", 0.40);    // cosine similarity threshold (L2-normed)
         declare_parameter("unknown_streak",  30);
+        declare_parameter("guest_streak",    5);
         declare_parameter("input_width",     640);
         declare_parameter("input_height",    480);
 
@@ -276,6 +277,7 @@ private:
         snapshot_path_      = get_parameter("snapshot_path").as_string();
         match_threshold_    = get_parameter("match_threshold").as_double();
         unknown_streak_max_ = get_parameter("unknown_streak").as_int();
+        guest_streak_max_   = get_parameter("guest_streak").as_int();
         input_width_        = get_parameter("input_width").as_int();
         input_height_       = get_parameter("input_height").as_int();
     }
@@ -374,10 +376,10 @@ private:
         aligner_->alignCrop(frame, faces.row(0), aligned);
 
         const auto embedding = sface_->embed(aligned);
-        if (embedding.empty()) return "Unknown";
+        if (embedding.empty()) return "Guest";
 
         std::lock_guard<std::mutex> lock(profiles_mutex_);
-        std::string best_name  = "Unknown";
+        std::string best_name  = "Guest";   // face detected but no profile match → Guest
         float       best_score = static_cast<float>(match_threshold_);
 
         for (const auto& profile : profiles_) {
@@ -418,20 +420,32 @@ private:
         const std::string detected = identify_face(frame);
 
         if (detected.empty()) {
+            // No face in frame at all
+            guest_streak_count_ = 0;
             unknown_streak_count_++;
             if (unknown_streak_count_ >= unknown_streak_max_) stable_user_ = "Unknown";
             return;
         }
 
-        if (detected == "Unknown") {
-            unknown_streak_count_++;
-            if (unknown_streak_count_ >= unknown_streak_max_) stable_user_ = "Unknown";
-        } else {
+        if (detected == "Guest") {
+            // Face present but not in any profile
             unknown_streak_count_ = 0;
+            guest_streak_count_++;
+            if (guest_streak_count_ >= guest_streak_max_ && stable_user_ != "Guest") {
+                stable_user_ = "Guest";
+                guest_streak_count_ = 0;
+                RCLCPP_INFO(get_logger(), "[FACE] Unknown person — greeting as Guest");
+                std_msgs::msg::String status_msg;
+                status_msg.data = "detected:Guest";
+                status_pub_->publish(status_msg);
+            }
+        } else {
+            // Known registered user
+            unknown_streak_count_ = 0;
+            guest_streak_count_ = 0;
             if (stable_user_ != detected) {
                 stable_user_ = detected;
                 RCLCPP_INFO(get_logger(), "[FACE] Identified: %s", detected.c_str());
-
                 std_msgs::msg::String status_msg;
                 status_msg.data = "identified:" + detected;
                 status_pub_->publish(status_msg);
@@ -519,6 +533,8 @@ private:
 
     std::string stable_user_{"Unknown"};
     int         unknown_streak_count_{0};
+    int         guest_streak_count_{0};
+    int         guest_streak_max_{5};
 
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr   trigger_sub_;
