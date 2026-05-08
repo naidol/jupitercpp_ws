@@ -46,6 +46,21 @@ std::vector<float> pcm16_to_float32(const std::vector<int16_t>& pcm) {
     return out;
 }
 
+// Returns true if the ASR result is a Whisper noise label rather than speech.
+// Whisper emits these for non-speech sounds: [Music], [Barking], (applause), *beep*, etc.
+bool is_noise_label(const std::string& text) {
+    if (text.empty()) return false;
+    const char first = text.front();
+    const char last  = text.back();
+    // Bracketed:  [Music]  [Barking]  [Laughter]
+    if (first == '[' && last == ']') return true;
+    // Parenthesised: (applause)  (music)
+    if (first == '(' && last == ')') return true;
+    // Asterisk-wrapped: *beep*  *music*
+    if (first == '*' && last == '*') return true;
+    return false;
+}
+
 // Remove shell-sensitive characters before passing text to piper subprocess
 std::string sanitize_for_shell(std::string text) {
     for (char& c : text) {
@@ -170,6 +185,12 @@ private:
 
             if (text.empty() || text.size() < 3) {
                 RCLCPP_DEBUG(get_logger(), "[ASR] Short/empty result — skipping");
+                continue;
+            }
+
+            // Drop Whisper noise labels — non-speech sounds transcribed as [Label] or (label)
+            if (is_noise_label(text)) {
+                RCLCPP_DEBUG(get_logger(), "[ASR] Noise label filtered: %s", text.c_str());
                 continue;
             }
 
