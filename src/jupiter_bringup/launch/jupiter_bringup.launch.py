@@ -4,9 +4,10 @@
 # Master bringup for Jupiter robot.
 #
 # Usage:
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py              # SLAM mapping mode
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py mode:=nav    # Autonomous navigation
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py mode:=nav map:=/path/to/map.yaml
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py                               # AI-only (voice/vision/brain/camera, no SLAM/LiDAR)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_slam:=true             # SLAM mapping mode
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_slam:=true mode:=nav  # Autonomous navigation
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_slam:=true mode:=nav map:=/path/to/map.yaml
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, TimerAction
@@ -21,11 +22,17 @@ def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
     ldlidar_dir  = get_package_share_directory('ldlidar_stl_ros2')
 
-    mode    = LaunchConfiguration('mode')
-    map_file = LaunchConfiguration('map')
+    mode        = LaunchConfiguration('mode')
+    map_file    = LaunchConfiguration('map')
+    enable_slam = LaunchConfiguration('enable_slam')
 
     return LaunchDescription([
 
+        DeclareLaunchArgument(
+            'enable_slam',
+            default_value='false',
+            description='Set true to enable SLAM/Nav2/EKF/LiDAR stack. Default false for AI-only operation.',
+        ),
         DeclareLaunchArgument(
             'mode',
             default_value='slam',
@@ -47,17 +54,17 @@ def generate_launch_description():
             name='micro_ros_agent',
         ),
 
-        # ── Navigation layer (mutually exclusive modes) ───────────────────────
-        # Start localization + SLAM first (t=3s) so the TF tree is populated
-        # before the LiDAR starts sending scans.
+        # ── Navigation layer — only when enable_slam:=true ────────────────────
 
-        # SLAM mode — builds a new map (includes localization)
+        # SLAM mode — builds a new map (includes localization + EKF)
         TimerAction(period=3.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     os.path.join(bringup_dir, 'launch', 'slam.launch.py')
                 ),
-                condition=IfCondition(PythonExpression(["'", mode, "' == 'slam'"])),
+                condition=IfCondition(PythonExpression([
+                    "'", enable_slam, "' == 'true' and '", mode, "' == 'slam'"
+                ])),
             ),
         ]),
 
@@ -68,22 +75,28 @@ def generate_launch_description():
                     os.path.join(bringup_dir, 'launch', 'navigation.launch.py')
                 ),
                 launch_arguments={'map': map_file}.items(),
-                condition=IfCondition(PythonExpression(["'", mode, "' == 'nav'"])),
+                condition=IfCondition(PythonExpression([
+                    "'", enable_slam, "' == 'true' and '", mode, "' == 'nav'"
+                ])),
             ),
         ]),
 
-        # LD19 LiDAR — delayed 6s so TF tree is ready before first scan arrives
+        # LD19 LiDAR — only needed for SLAM/Nav
         TimerAction(period=6.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     os.path.join(ldlidar_dir, 'launch', 'ld19.launch.py')
-                )
+                ),
+                condition=IfCondition(enable_slam),
             ),
         ]),
 
         # ── Perception layer ──────────────────────────────────────────────────
 
-        # Orbbec Gemini 336 camera — delayed 4s so ROS2 graph is ready
+        # Orbbec Gemini 336 — AI-only mode: color-only MJPG 640x480 @ 15fps.
+        # Depth disabled: tegra-xusb shares one DMA engine across all USB ports.
+        # Depth streaming saturates it during Whisper GPU inference, causing MJPG
+        # frame decode failures. Color-only keeps USB bandwidth well within budget.
         TimerAction(period=4.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -92,6 +105,43 @@ def generate_launch_description():
                         'launch', 'gemini_330_series.launch.py'
                     )
                 ),
+                launch_arguments={
+                    'color_width':                '640',
+                    'color_height':               '480',
+                    'color_fps':                  '15',
+                    'color_format':               'MJPG',
+                    'enable_depth':               'false',
+                    'enable_ir':                  'false',
+                    'enable_point_cloud':         'false',
+                    'enable_colored_point_cloud': 'false',
+                }.items(),
+                condition=IfCondition(PythonExpression(["'", enable_slam, "' == 'false'"])),
+            ),
+        ]),
+
+        # Orbbec Gemini 336 — SLAM/Nav mode: color + depth enabled.
+        # Depth is required for Nav2 costmaps and AprilTag docking distance.
+        # LiDAR is also running in this mode, so Whisper is the primary USB
+        # contender — acceptable since navigation reduces voice interaction.
+        TimerAction(period=4.0, actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        get_package_share_directory('orbbec_camera'),
+                        'launch', 'gemini_330_series.launch.py'
+                    )
+                ),
+                launch_arguments={
+                    'color_width':                '640',
+                    'color_height':               '480',
+                    'color_fps':                  '15',
+                    'color_format':               'MJPG',
+                    'enable_depth':               'true',
+                    'enable_ir':                  'false',
+                    'enable_point_cloud':         'false',
+                    'enable_colored_point_cloud': 'false',
+                }.items(),
+                condition=IfCondition(enable_slam),
             ),
         ]),
 
@@ -124,6 +174,10 @@ def generate_launch_description():
                 executable='jupiter_voice',
                 name='jupiter_voice',
                 output='screen',
+                parameters=[{
+                    'energy_threshold': 500.0,  # raise from 300 — filters ambient noise, speech RMS typically 2000+
+                    'record_seconds':   8,       # 8s window → Whisper fires at most every 8s instead of 5s
+                }],
             ),
         ]),
 
