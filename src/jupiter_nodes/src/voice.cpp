@@ -294,7 +294,8 @@ private:
         wparams.print_progress   = false;
         wparams.print_timestamps = false;
         wparams.print_special    = false;
-        wparams.initial_prompt   = "Jupiter is a home robot assistant.";
+        // No initial_prompt — priming with "robot/computer" vocabulary caused
+        // Whisper to generate on-topic hallucinations from ambient noise.
 
         if (whisper_full(whisper_ctx_, wparams, pcmf32.data(),
                          static_cast<int>(pcmf32.size())) != 0) {
@@ -302,8 +303,28 @@ private:
             return {};
         }
 
-        std::string result;
+        // Check average token confidence across all segments — hallucinated text
+        // from ambient noise has characteristically low token probabilities
+        float total_prob  = 0.0f;
+        int   token_count = 0;
         const int n_segments = whisper_full_n_segments(whisper_ctx_);
+        for (int i = 0; i < n_segments; ++i) {
+            const int n_tokens = whisper_full_n_tokens(whisper_ctx_, i);
+            for (int j = 0; j < n_tokens; ++j) {
+                const whisper_token_data td = whisper_full_get_token_data(whisper_ctx_, i, j);
+                if (td.id < whisper_token_eot(whisper_ctx_)) {  // skip special tokens
+                    total_prob += td.p;
+                    ++token_count;
+                }
+            }
+        }
+        if (token_count > 0 && (total_prob / token_count) < 0.40f) {
+            RCLCPP_DEBUG(get_logger(), "[ASR] Low avg token confidence %.2f — likely hallucination",
+                total_prob / token_count);
+            return {};
+        }
+
+        std::string result;
         for (int i = 0; i < n_segments; ++i) {
             // Skip segments Whisper itself flags as likely non-speech
             const float no_speech_prob = whisper_full_get_segment_no_speech_prob(whisper_ctx_, i);
