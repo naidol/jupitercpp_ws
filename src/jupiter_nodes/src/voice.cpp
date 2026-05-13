@@ -194,6 +194,20 @@ private:
                 continue;
             }
 
+            // Require at least 2 words — single-word results are almost always hallucinations
+            {
+                size_t word_count = 0;
+                bool in_word = false;
+                for (char c : text) {
+                    if (c != ' ' && !in_word) { ++word_count; in_word = true; }
+                    else if (c == ' ')         { in_word = false; }
+                }
+                if (word_count < 2) {
+                    RCLCPP_DEBUG(get_logger(), "[ASR] Single-word result filtered: %s", text.c_str());
+                    continue;
+                }
+            }
+
             RCLCPP_INFO(get_logger(), "[USER] %s", text.c_str());
 
             std_msgs::msg::String msg;
@@ -291,6 +305,12 @@ private:
         std::string result;
         const int n_segments = whisper_full_n_segments(whisper_ctx_);
         for (int i = 0; i < n_segments; ++i) {
+            // Skip segments Whisper itself flags as likely non-speech
+            const float no_speech_prob = whisper_full_get_segment_no_speech_prob(whisper_ctx_, i);
+            if (no_speech_prob > 0.5f) {
+                RCLCPP_DEBUG(get_logger(), "[ASR] Segment %d no_speech_prob=%.2f — skipping", i, no_speech_prob);
+                continue;
+            }
             result += whisper_full_get_segment_text(whisper_ctx_, i);
         }
 
@@ -310,6 +330,8 @@ private:
 
         is_speaking_ = true;
         speak(text);
+        // Brief pause so room echo from TTS playback dies down before next capture
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
         is_speaking_ = false;
 
         RCLCPP_INFO(get_logger(), "[LISTENING] Ready");
