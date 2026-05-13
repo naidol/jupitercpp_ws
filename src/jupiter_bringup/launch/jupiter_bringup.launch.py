@@ -152,6 +152,9 @@ def generate_launch_description():
                 executable='jupiter_face_recognition',
                 name='jupiter_face_recognition',
                 output='screen',
+                parameters=[{
+                    'match_threshold': 0.55,  # SFace paper threshold — 0.40 caused false matches
+                }],
             ),
         ]),
 
