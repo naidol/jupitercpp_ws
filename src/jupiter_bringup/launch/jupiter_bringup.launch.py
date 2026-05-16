@@ -4,10 +4,10 @@
 # Master bringup for Jupiter robot.
 #
 # Usage:
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py                               # AI-only (voice/vision/brain/camera, no SLAM/LiDAR)
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_slam:=true             # SLAM mapping mode
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_slam:=true mode:=nav  # Autonomous navigation
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_slam:=true mode:=nav map:=/path/to/map.yaml
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py                                              # AI-only (voice/vision/brain/camera, no SLAM/LiDAR, no micro-ROS)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true                        # AI-only + ESP32 (IMU, odometry, cmd_vel)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_slam:=true      # SLAM mapping mode
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_slam:=true mode:=nav  # Autonomous navigation
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, TimerAction
@@ -22,12 +22,18 @@ def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
     ldlidar_dir  = get_package_share_directory('ldlidar_stl_ros2')
 
-    mode        = LaunchConfiguration('mode')
-    map_file    = LaunchConfiguration('map')
-    enable_slam = LaunchConfiguration('enable_slam')
+    mode           = LaunchConfiguration('mode')
+    map_file       = LaunchConfiguration('map')
+    enable_slam    = LaunchConfiguration('enable_slam')
+    enable_microros = LaunchConfiguration('enable_microros')
 
     return LaunchDescription([
 
+        DeclareLaunchArgument(
+            'enable_microros',
+            default_value='false',
+            description='Set true to start micro-ROS agent (requires ESP32 on /dev/jupiter_esp32).',
+        ),
         DeclareLaunchArgument(
             'enable_slam',
             default_value='false',
@@ -52,6 +58,7 @@ def generate_launch_description():
                  'serial', '--dev', '/dev/jupiter_esp32', '-b', '115200'],
             output='screen',
             name='micro_ros_agent',
+            condition=IfCondition(enable_microros),
         ),
 
         # ── Navigation layer — only when enable_slam:=true ────────────────────
@@ -178,8 +185,9 @@ def generate_launch_description():
                 name='jupiter_voice',
                 output='screen',
                 parameters=[{
-                    'energy_threshold': 500.0,  # raise from 300 — filters ambient noise, speech RMS typically 2000+
-                    'record_seconds':   8,       # 8s window → Whisper fires at most every 8s instead of 5s
+                    'energy_threshold': 500.0,   # coarse pre-filter; VAD catches steady noise above this
+                    'record_seconds':   8,        # 8s window for better Whisper noise robustness
+                    'vad_snr_ratio':    1.7,      # peak/trough RMS ratio: HVAC≈1.1, speech≈2-10
                 }],
             ),
         ]),

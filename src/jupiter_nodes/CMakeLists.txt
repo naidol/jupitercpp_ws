@@ -30,6 +30,9 @@ set(WHISPER_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../whisper.cpp/include")
 set(WHISPER_GGML_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../whisper.cpp/ggml/include")
 set(WHISPER_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../../whisper.cpp/build/src/libwhisper.so")
 
+# sherpa-onnx paths (pre-built aarch64 shared library in workspace root)
+set(SHERPA_ONNX_DIR "$ENV{HOME}/jupitercpp_ws/sherpa-onnx")
+
 # Add all includes explicitly to ensure the compiler sees cv_bridge and VPI
 include_directories(
   include
@@ -91,9 +94,9 @@ target_link_libraries(jupiter_voice
   ${WHISPER_LIB}
 )
 
-# Embed RPATH so jupiter_voice finds libwhisper.so at runtime without LD_LIBRARY_PATH
+# Embed RPATH so jupiter_voice finds libwhisper.so at runtime
 set_target_properties(jupiter_voice PROPERTIES
-  BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/../../whisper.cpp/build/src"
+  BUILD_RPATH   "${CMAKE_CURRENT_SOURCE_DIR}/../../whisper.cpp/build/src"
   INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/../../whisper.cpp/build/src"
 )
 

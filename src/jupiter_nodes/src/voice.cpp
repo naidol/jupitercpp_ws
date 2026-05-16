@@ -18,6 +18,7 @@
 #include <csignal>
 #include <fcntl.h>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <sys/wait.h>
@@ -52,11 +53,8 @@ bool is_noise_label(const std::string& text) {
     if (text.empty()) return false;
     const char first = text.front();
     const char last  = text.back();
-    // Bracketed:  [Music]  [Barking]  [Laughter]
     if (first == '[' && last == ']') return true;
-    // Parenthesised: (applause)  (music)
     if (first == '(' && last == ')') return true;
-    // Asterisk-wrapped: *beep*  *music*
     if (first == '*' && last == '*') return true;
     return false;
 }
@@ -94,13 +92,12 @@ public:
         audio_thread_ = std::thread(&JupiterVoice::audio_loop, this);
 
         RCLCPP_INFO(get_logger(), "Jupiter Voice online — pw-record capture + whisper.cpp ASR + piper TTS");
-        RCLCPP_INFO(get_logger(), "Recording %ds chunks @ %dHz  |  model: %s",
-            record_seconds_, sample_rate_, whisper_model_.c_str());
+        RCLCPP_INFO(get_logger(), "Recording %ds chunks @ %dHz  |  VAD SNR ratio %.1f  |  model: %s",
+            record_seconds_, sample_rate_, vad_snr_ratio_, whisper_model_.c_str());
     }
 
     ~JupiterVoice() {
         running_ = false;
-        // Kill any in-progress pw-record so the audio thread unblocks immediately
         const pid_t pid = capture_pid_.load();
         if (pid > 0) ::kill(pid, SIGTERM);
         if (audio_thread_.joinable()) {
@@ -127,6 +124,10 @@ private:
         declare_parameter("whisper_threads",    4);
         declare_parameter("whisper_language",   std::string("en"));
         declare_parameter("response_timeout_s", 30);
+        declare_parameter("asr_cooldown_s",     0);
+        // Minimum peak-to-trough RMS ratio across 100ms windows to classify as speech.
+        // HVAC steady noise ≈ 1.05-1.2; speech (starts/stops/pauses) ≈ 2.0-10.0.
+        declare_parameter("vad_snr_ratio",      1.7);
 
         whisper_model_      = get_parameter("whisper_model").as_string();
         piper_binary_       = get_parameter("piper_binary").as_string();
@@ -137,6 +138,8 @@ private:
         whisper_threads_    = get_parameter("whisper_threads").as_int();
         whisper_language_   = get_parameter("whisper_language").as_string();
         response_timeout_s_ = get_parameter("response_timeout_s").as_int();
+        asr_cooldown_s_     = get_parameter("asr_cooldown_s").as_int();
+        vad_snr_ratio_      = static_cast<float>(get_parameter("vad_snr_ratio").as_double());
     }
 
     // ── Initialisation ────────────────────────────────────────────────────────
@@ -154,14 +157,48 @@ private:
         RCLCPP_INFO(get_logger(), "Whisper model loaded (GPU enabled)");
     }
 
+    // ── Temporal energy ratio VAD ─────────────────────────────────────────────
+    //
+    // Splits the captured buffer into 100ms windows and computes per-window RMS.
+    // Returns true if max_window_rms / min_window_rms exceeds vad_snr_ratio_.
+    //
+    // Rationale: steady background noise (HVAC fans) has near-constant energy
+    // across time → low ratio. Speech has loud consonants/vowels interspersed with
+    // pauses → high ratio. No external library required; runs in microseconds on CPU.
+    bool vad_has_speech(const std::vector<int16_t>& pcm) const {
+        const int window_samples = sample_rate_ / 10;  // 100ms
+        const int n_windows      = static_cast<int>(pcm.size()) / window_samples;
+        if (n_windows < 4) return true;  // buffer too short to judge — pass through
+
+        float min_rms = std::numeric_limits<float>::max();
+        float max_rms = 0.0f;
+
+        for (int i = 0; i < n_windows; ++i) {
+            double sum_sq = 0.0;
+            const int offset = i * window_samples;
+            for (int j = 0; j < window_samples; ++j) {
+                const float s = static_cast<float>(pcm[offset + j]);
+                sum_sq += s * s;
+            }
+            const float rms = static_cast<float>(std::sqrt(sum_sq / window_samples));
+            if (rms < min_rms) min_rms = rms;
+            if (rms > max_rms) max_rms = rms;
+        }
+
+        if (min_rms < 1.0f) return max_rms > energy_threshold_;  // avoid divide-by-zero
+        return (max_rms / min_rms) > vad_snr_ratio_;
+    }
+
     // ── Audio capture loop (background thread) ────────────────────────────────
 
     void audio_loop() {
         const std::string tmp_file =
             "/tmp/jupiter_capture_" + std::to_string(getpid()) + ".raw";
+        bool was_speaking = false;
 
         while (running_) {
             if (is_speaking_.load()) {
+                was_speaking = true;
                 if (std::chrono::steady_clock::now() > speak_deadline_) {
                     RCLCPP_WARN(get_logger(), "[WATCHDOG] No response received — resuming listening");
                     is_speaking_ = false;
@@ -170,25 +207,41 @@ private:
                 continue;
             }
 
+            if (was_speaking) {
+                was_speaking = false;
+                last_asr_run_ = std::chrono::steady_clock::time_point{};
+            }
+
             const std::vector<int16_t> buf = capture_chunk(tmp_file);
             if (buf.empty()) continue;
 
             if (is_speaking_.load()) continue;
 
             const float energy = compute_rms_energy(buf);
-            RCLCPP_DEBUG(get_logger(), "[VAD] Energy %.0f  threshold %.0f", energy, energy_threshold_);
+            RCLCPP_DEBUG(get_logger(), "[VAD] RMS %.0f  threshold %.0f", energy, energy_threshold_);
             if (energy < energy_threshold_) continue;
 
-            RCLCPP_INFO(get_logger(), "[PROCESSING] Energy %.0f — transcribing...", energy);
+            // Temporal energy ratio VAD — gates Whisper on CPU before touching the GPU.
+            // Prevents the GPU spike (idle→1575MHz) that causes desktop jitter on every
+            // ambient-noise capture.
+            if (!vad_has_speech(buf)) {
+                RCLCPP_DEBUG(get_logger(), "[VAD] Steady noise (RMS %.0f) — skipping Whisper", energy);
+                continue;
+            }
 
-            const std::string text = run_asr(buf);
+            // Speech confirmed — convert to float32 for Whisper
+            const std::vector<float> pcmf32 = pcm16_to_float32(buf);
+
+            RCLCPP_INFO(get_logger(), "[PROCESSING] Energy %.0f — transcribing...", energy);
+            last_asr_run_ = std::chrono::steady_clock::now();
+
+            const std::string text = run_asr(pcmf32);
 
             if (text.empty() || text.size() < 3) {
                 RCLCPP_DEBUG(get_logger(), "[ASR] Short/empty result — skipping");
                 continue;
             }
 
-            // Drop Whisper noise labels — non-speech sounds transcribed as [Label] or (label)
             if (is_noise_label(text)) {
                 RCLCPP_DEBUG(get_logger(), "[ASR] Noise label filtered: %s", text.c_str());
                 continue;
@@ -283,8 +336,7 @@ private:
 
     // ── ASR ───────────────────────────────────────────────────────────────────
 
-    std::string run_asr(const std::vector<int16_t>& pcm) {
-        const std::vector<float> pcmf32 = pcm16_to_float32(pcm);
+    std::string run_asr(const std::vector<float>& pcmf32) {
 
         whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wparams.language         = whisper_language_.c_str();
@@ -303,8 +355,8 @@ private:
             return {};
         }
 
-        // Check average token confidence across all segments — hallucinated text
-        // from ambient noise has characteristically low token probabilities
+        // Check average token confidence — hallucinated text has characteristically
+        // low token probabilities
         float total_prob  = 0.0f;
         int   token_count = 0;
         const int n_segments = whisper_full_n_segments(whisper_ctx_);
@@ -312,13 +364,13 @@ private:
             const int n_tokens = whisper_full_n_tokens(whisper_ctx_, i);
             for (int j = 0; j < n_tokens; ++j) {
                 const whisper_token_data td = whisper_full_get_token_data(whisper_ctx_, i, j);
-                if (td.id < whisper_token_eot(whisper_ctx_)) {  // skip special tokens
+                if (td.id < whisper_token_eot(whisper_ctx_)) {
                     total_prob += td.p;
                     ++token_count;
                 }
             }
         }
-        if (token_count > 0 && (total_prob / token_count) < 0.40f) {
+        if (token_count > 0 && (total_prob / token_count) < 0.30f) {
             RCLCPP_DEBUG(get_logger(), "[ASR] Low avg token confidence %.2f — likely hallucination",
                 total_prob / token_count);
             return {};
@@ -326,7 +378,6 @@ private:
 
         std::string result;
         for (int i = 0; i < n_segments; ++i) {
-            // Skip segments Whisper itself flags as likely non-speech
             const float no_speech_prob = whisper_full_get_segment_no_speech_prob(whisper_ctx_, i);
             if (no_speech_prob > 0.5f) {
                 RCLCPP_DEBUG(get_logger(), "[ASR] Segment %d no_speech_prob=%.2f — skipping", i, no_speech_prob);
@@ -391,7 +442,12 @@ private:
     std::atomic<bool>      running_{true};
     std::atomic<bool>      is_speaking_{false};
     int                    response_timeout_s_{30};
+    int                    asr_cooldown_s_{0};
+    std::chrono::steady_clock::time_point last_asr_run_{std::chrono::steady_clock::time_point{}};
     std::chrono::steady_clock::time_point speak_deadline_{std::chrono::steady_clock::time_point::max()};
+
+    // Temporal energy ratio VAD
+    float vad_snr_ratio_{1.7f};
 
     // ROS2
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    text_pub_;
