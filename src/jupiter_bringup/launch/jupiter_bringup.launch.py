@@ -175,6 +175,18 @@ def generate_launch_description():
             ),
         ]),
 
+        # ── Display ───────────────────────────────────────────────────────────
+
+        TimerAction(period=2.0, actions=[
+            Node(
+                package='jupiter_display',
+                executable='jupiter_display',
+                name='jupiter_display',
+                output='screen',
+                additional_env={'DISPLAY': ':1'},
+            ),
+        ]),
+
         # ── Voice + Brain layer ───────────────────────────────────────────────
 
         # Whisper ASR + Piper TTS
