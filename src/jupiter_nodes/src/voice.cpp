@@ -404,6 +404,9 @@ private:
         speak(text);
         // Brief pause so room echo from TTS playback dies down before next capture
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // Reset deadline so a stale timeout from a previous query doesn't fire
+        // the watchdog the next time is_speaking_ goes true (e.g. an autonomous greeting)
+        speak_deadline_ = std::chrono::steady_clock::time_point::max();
         is_speaking_ = false;
 
         RCLCPP_INFO(get_logger(), "[LISTENING] Ready");

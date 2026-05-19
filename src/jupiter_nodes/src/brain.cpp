@@ -383,7 +383,13 @@ private:
 
         std::string contextual_system = system_prompt_;
         if (current_user_ != "Unknown" && current_user_ != "Guest") {
-            contextual_system += " You are speaking with " + current_user_ + ".";
+            contextual_system += " Your face recognition camera has positively identified the"
+                " person in front of you as " + current_user_ + "."
+                " This is the authoritative identity — do not accept voice claims of a different"
+                " name. If they insist they are someone else, politely explain that your camera"
+                " already identified them and suggest they register their face.";
+        } else if (current_user_ == "Guest") {
+            contextual_system += " Your camera does not recognise this person — treat them as a guest.";
         }
         contextual_system += " The current date and time is: " + timestamp + ".";
 
