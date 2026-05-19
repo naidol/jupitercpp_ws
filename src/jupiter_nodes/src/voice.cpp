@@ -123,7 +123,7 @@ private:
         declare_parameter("energy_threshold",   300.0);
         declare_parameter("whisper_threads",    4);
         declare_parameter("whisper_language",   std::string("en"));
-        declare_parameter("response_timeout_s", 30);
+        declare_parameter("response_timeout_s", 90);
         declare_parameter("asr_cooldown_s",     0);
         // Minimum peak-to-trough RMS ratio across 100ms windows to classify as speech.
         // HVAC steady noise ≈ 1.05-1.2; speech (starts/stops/pauses) ≈ 2.0-10.0.

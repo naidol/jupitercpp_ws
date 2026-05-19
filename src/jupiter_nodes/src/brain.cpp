@@ -16,6 +16,7 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -136,7 +137,10 @@ public:
         RCLCPP_INFO(get_logger(), "Memory dir: %s", memory_dir_.c_str());
     }
 
-    ~JupiterBrain() { curl_global_cleanup(); }
+    ~JupiterBrain() {
+        if (llm_thread_.joinable()) llm_thread_.join();
+        curl_global_cleanup();
+    }
 
 private:
     // ── Parameters ────────────────────────────────────────────────────────────
@@ -156,7 +160,7 @@ private:
             "concise, natural, and conversational. "
             "You know the people who live here and greet them by name. "
             "If you are speaking with a guest you do not recognise, be warm and welcoming."));
-        declare_parameter("max_tokens",        2000);
+        declare_parameter("max_tokens",        400);
         declare_parameter("temperature",       0.7);
         declare_parameter("max_history_turns", 10);
 
@@ -279,23 +283,36 @@ private:
             return;
         }
 
-        std::string reply;
-
-        if (is_visual_query(user_text)) {
-            RCLCPP_INFO(get_logger(), "[VISION] Visual query detected — capturing frame");
-            reply = strip_non_ascii(query_vlm(user_text));
-        } else {
-            reply = strip_non_ascii(query_llm(user_text));
-        }
-
-        if (reply.empty()) {
-            RCLCPP_WARN(get_logger(), "Empty LLM response");
+        // Drop incoming query if LLM is already busy — one request at a time
+        if (llm_busy_.exchange(true)) {
+            RCLCPP_WARN(get_logger(), "LLM busy — ignoring query");
             return;
         }
 
-        RCLCPP_INFO(get_logger(), "[JUPITER] %s", reply.c_str());
-        update_history(user_text, reply);
-        speak(reply);
+        // Run the LLM call on a background thread so the spin loop stays responsive
+        if (llm_thread_.joinable()) llm_thread_.join();
+        const std::string captured_user = current_user_;
+        const bool visual = is_visual_query(user_text);
+        llm_thread_ = std::thread([this, user_text, captured_user, visual]() {
+            std::string reply;
+            if (visual) {
+                RCLCPP_INFO(get_logger(), "[VISION] Visual query detected — capturing frame");
+                reply = strip_non_ascii(query_vlm(user_text));
+            } else {
+                reply = strip_non_ascii(query_llm(user_text));
+            }
+            llm_busy_.store(false);
+
+            if (reply.empty()) {
+                RCLCPP_WARN(get_logger(), "Empty LLM response");
+                return;
+            }
+
+            RCLCPP_INFO(get_logger(), "[JUPITER] %s", reply.c_str());
+            update_history(user_text, reply);
+            speak(reply);
+        });
+        llm_thread_.detach();
     }
 
     // ── VLM query (llava:7b) ──────────────────────────────────────────────────
@@ -428,12 +445,12 @@ private:
 
         try {
             const json resp = json::parse(response_raw);
-            const json& response_msg = resp.at("choices").at(0).at("message");
-            std::string content = response_msg.at("content").get<std::string>();
-            if (content.empty() && response_msg.contains("reasoning")) {
-                content = response_msg.at("reasoning").get<std::string>();
+            const json& msg = resp.at("choices").at(0).at("message");
+            if (msg.contains("content") && !msg.at("content").is_null()) {
+                return msg.at("content").get<std::string>();
             }
-            return content;
+            RCLCPP_ERROR(get_logger(), "content null | raw: %.200s", response_raw.c_str());
+            return {};
         } catch (const json::exception& e) {
             RCLCPP_ERROR(get_logger(), "JSON parse error: %s | raw: %.200s",
                 e.what(), response_raw.c_str());
@@ -521,13 +538,16 @@ private:
     std::string snapshot_path_;
     std::string memory_dir_;
     std::string system_prompt_;
-    int         max_tokens_{2000};
+    int         max_tokens_{400};
     double      temperature_{0.7};
     int         max_history_turns_{10};
 
     std::string current_user_{"Unknown"};
     bool        awaiting_registration_consent_{false};
     std::string pending_registration_name_;
+
+    std::atomic<bool> llm_busy_{false};
+    std::thread       llm_thread_;
 
     struct Message { std::string role; std::string content; };
     std::vector<Message> history_;
