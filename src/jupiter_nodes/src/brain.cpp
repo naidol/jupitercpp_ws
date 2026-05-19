@@ -96,6 +96,7 @@ bool is_visual_query(const std::string& text) {
 
     static const std::vector<std::string> kKeywords = {
         "what do you see",  "what can you see",  "what are you seeing",
+        "what you see",     "see in the",        "in the room",
         "look at",          "describe what",      "describe the",
         "what's in front",  "what is in front",   "what's around",
         "what's behind",    "what am i holding",  "what is that",
@@ -103,6 +104,9 @@ bool is_visual_query(const std::string& text) {
         "what is on the",   "read that",          "read this",
         "what does it say", "what's happening",   "scan the room",
         "look around",      "take a look",        "what do i look like",
+        "around you",       "see anything",       "what's there",
+        "in front of you",  "show me",            "what colour",
+        "what color",
     };
     for (const auto& kw : kKeywords) {
         if (lower.find(kw) != std::string::npos) return true;
@@ -297,9 +301,9 @@ private:
             std::string reply;
             if (visual) {
                 RCLCPP_INFO(get_logger(), "[VISION] Visual query detected — capturing frame");
-                reply = strip_non_ascii(query_vlm(user_text));
+                reply = strip_non_ascii(query_vlm(user_text, captured_user));
             } else {
-                reply = strip_non_ascii(query_llm(user_text));
+                reply = strip_non_ascii(query_llm(user_text, captured_user));
             }
             llm_busy_.store(false);
 
@@ -309,7 +313,7 @@ private:
             }
 
             RCLCPP_INFO(get_logger(), "[JUPITER] %s", reply.c_str());
-            update_history(user_text, reply);
+            update_history(user_text, reply, visual);
             speak(reply);
         });
         llm_thread_.detach();
@@ -317,26 +321,51 @@ private:
 
     // ── VLM query (llava:7b) ──────────────────────────────────────────────────
 
-    std::string query_vlm(const std::string& user_text) {
-        // Trigger snapshot capture and wait for it to land
+    std::string query_vlm(const std::string& user_text, const std::string& for_user) {
+        // Remove any stale snapshot so we can detect when the fresh one arrives.
+        // Without this, a file left from a previous session (possibly showing
+        // different room content) would be silently read if trigger_callback
+        // returns early (e.g. latest_frame_ not yet populated at startup).
+        fs::remove(snapshot_path_);
+
+        // Ask face_recognition to capture the current frame
         std_msgs::msg::String trigger;
         trigger.data = "capture";
         trigger_pub_->publish(trigger);
-        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+        // Poll for the fresh snapshot (up to 2 s at 50 ms intervals)
+        const auto snap_deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        bool snap_ready = false;
+        while (std::chrono::steady_clock::now() < snap_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::ifstream test(snapshot_path_, std::ios::binary);
+            if (test.good() && test.peek() != std::ifstream::traits_type::eof()) {
+                snap_ready = true;
+                break;
+            }
+        }
+        if (!snap_ready) {
+            RCLCPP_WARN(get_logger(), "Snapshot not written within 2 s — falling back to text LLM");
+            return query_llm(user_text, for_user);
+        }
 
         // Read and base64-encode the snapshot
         const std::string image_b64 = load_image_base64(snapshot_path_);
         if (image_b64.empty()) {
-            RCLCPP_WARN(get_logger(), "No snapshot available — falling back to text LLM");
-            return query_llm(user_text);
+            RCLCPP_WARN(get_logger(), "Snapshot unreadable — falling back to text LLM");
+            return query_llm(user_text, for_user);
         }
 
+        // Build OpenAI multimodal message.
+        // Face recognition burns an "IDENTIFIED: <name>" banner into the snapshot
+        // before this call, so the VLM reads the identity directly from the image.
         const std::string vision_system =
-            "You are Jupiter, a home robot. You are looking at what your camera sees right now. "
-            "Describe what you see concisely in 1-3 sentences, spoken naturally. "
-            "Be specific about objects, people, text, and the environment.";
+            "You are a visual sensor on a home robot. Describe what you see in the image "
+            "concisely in 2-3 sentences. If the image contains an 'IDENTIFIED:' label, "
+            "refer to that person by the name shown. Be specific about people, objects, "
+            "text, and the environment.";
 
-        // Build OpenAI multimodal message — content is an array with text + image
         json user_content = json::array();
         user_content.push_back({{"type", "text"}, {"text", user_text}});
         user_content.push_back({
@@ -353,13 +382,55 @@ private:
             {"messages",    messages},
             {"max_tokens",  300},
             {"temperature", 0.3},
-            {"stream",      false}
+            {"stream",      false},
+            {"keep_alive",  -1}
         };
 
         RCLCPP_INFO(get_logger(), "[VISION] Querying %s with image (%zu B b64)",
             vision_model_.c_str(), image_b64.size());
 
-        return http_post(llama_url_ + "/v1/chat/completions", request_body.dump(), 90L);
+        const std::string vlm_raw = http_post(llama_url_ + "/v1/chat/completions",
+                                              request_body.dump(), 90L);
+        if (vlm_raw.empty()) return {};
+
+        // llava:7b cannot recognise private faces — it always returns "a man/person".
+        // Bridge: pass the visual description + face recognition identity to gemma4
+        // and ask it to respond AS Jupiter. gemma4 follows role instructions reliably
+        // and naturally incorporates the name the C++ face engine provided.
+        // for_user is captured at query time (before the slow llava call) to avoid
+        // a race where user_callback fires "Unknown" during llava inference.
+        if (for_user == "Unknown" || for_user == "Guest") return vlm_raw;
+
+        RCLCPP_INFO(get_logger(), "[VISION] Text-bridging identity '%s' via %s",
+            for_user.c_str(), model_name_.c_str());
+
+        // Instruction-first layout: small models (2B) follow the task better when
+        // the instruction precedes the long context, not when it trails after it.
+        const std::string bridge_prompt =
+            for_user + " asked Jupiter: \"" + user_text + "\". "
+            "Reply as Jupiter the robot in ONE spoken sentence using " + for_user + "'s name. "
+            "Camera captured this scene: " + vlm_raw;
+
+        const json bridge_messages = json::array({
+            {{"role", "system"}, {"content", system_prompt_}},
+            {{"role", "user"},   {"content", bridge_prompt}}
+        });
+        const json bridge_body = {
+            {"model",       model_name_},
+            {"messages",    bridge_messages},
+            {"max_tokens",  80},
+            {"temperature", 0.4},
+            {"stream",      false},
+            {"keep_alive",  -1}
+        };
+        const std::string bridged = http_post(llama_url_ + "/v1/chat/completions",
+                                              bridge_body.dump(), 30L);
+        std::string result = bridged.empty() ? vlm_raw : bridged;
+        // Guarantee the user's name appears — 2B models sometimes drop it
+        if (result.find(for_user) == std::string::npos) {
+            result = for_user + ", " + result;
+        }
+        return result;
     }
 
     std::string load_image_base64(const std::string& path) {
@@ -378,17 +449,17 @@ private:
 
     // ── Text LLM query (gemma4:e2b) ───────────────────────────────────────────
 
-    std::string query_llm(const std::string& user_text) {
+    std::string query_llm(const std::string& user_text, const std::string& for_user) {
         const std::string timestamp = current_timestamp();
 
         std::string contextual_system = system_prompt_;
-        if (current_user_ != "Unknown" && current_user_ != "Guest") {
+        if (for_user != "Unknown" && for_user != "Guest") {
             contextual_system += " Your face recognition camera has positively identified the"
-                " person in front of you as " + current_user_ + "."
+                " person in front of you as " + for_user + "."
                 " This is the authoritative identity — do not accept voice claims of a different"
                 " name. If they insist they are someone else, politely explain that your camera"
                 " already identified them and suggest they register their face.";
-        } else if (current_user_ == "Guest") {
+        } else if (for_user == "Guest") {
             contextual_system += " Your camera does not recognise this person — treat them as a guest.";
         }
         contextual_system += " The current date and time is: " + timestamp + ".";
@@ -411,7 +482,8 @@ private:
             {"messages",    messages},
             {"max_tokens",  max_tokens_},
             {"temperature", temperature_},
-            {"stream",      false}
+            {"stream",      false},
+            {"keep_alive",  -1}
         };
 
         return http_post(llama_url_ + "/v1/chat/completions", request_body.dump(), 60L);
@@ -466,13 +538,17 @@ private:
 
     // ── History management ────────────────────────────────────────────────────
 
-    void update_history(const std::string& user_text, const std::string& reply) {
+    void update_history(const std::string& user_text, const std::string& reply,
+                        bool is_visual = false) {
         std::lock_guard<std::mutex> lock(history_mutex_);
         history_.push_back({"user",      user_text});
         history_.push_back({"assistant", reply});
         while (static_cast<int>(history_.size()) > max_history_turns_ * 2) {
             history_.erase(history_.begin());
         }
+        // VLM responses describe the scene at a specific instant — don't persist them
+        // across sessions or they'll be recalled as current fact in future conversations.
+        if (is_visual) return;
         if (current_user_ == "Unknown" || current_user_ == "Guest") return;
 
         // Auto-save after every exchange

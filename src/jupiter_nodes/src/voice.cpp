@@ -10,6 +10,7 @@
 
 #include "whisper.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -98,8 +99,10 @@ public:
 
     ~JupiterVoice() {
         running_ = false;
-        const pid_t pid = capture_pid_.load();
-        if (pid > 0) ::kill(pid, SIGTERM);
+        const pid_t tts = tts_pid_.load();
+        if (tts > 0) ::kill(tts, SIGTERM);
+        const pid_t rec = capture_pid_.load();
+        if (rec > 0) ::kill(rec, SIGTERM);
         if (audio_thread_.joinable()) {
             audio_thread_.join();
         }
@@ -170,10 +173,19 @@ private:
         const int n_windows      = static_cast<int>(pcm.size()) / window_samples;
         if (n_windows < 4) return true;  // buffer too short to judge — pass through
 
-        float min_rms = std::numeric_limits<float>::max();
-        float max_rms = 0.0f;
+        // Skip the first second of every recording.  pw-record has a ~0.5-1.0s
+        // startup ramp: output file opens, audio device initialises, then noise
+        // ramps from near-zero up to the real noise floor.  Those transition
+        // windows (RMS 50-1500) end up as the minimum of the sorted distribution
+        // and inflate max/min ratio for completely steady background noise, causing
+        // the VAD to pass every capture even when the room is silent.
+        // Capped at 25% of the recording so we never discard most of a short buffer.
+        const int startup_skip = std::min(n_windows / 4, sample_rate_ / window_samples);
 
-        for (int i = 0; i < n_windows; ++i) {
+        std::vector<float> rms_vals;
+        rms_vals.reserve(n_windows - startup_skip);
+
+        for (int i = startup_skip; i < n_windows; ++i) {
             double sum_sq = 0.0;
             const int offset = i * window_samples;
             for (int j = 0; j < window_samples; ++j) {
@@ -181,11 +193,32 @@ private:
                 sum_sq += s * s;
             }
             const float rms = static_cast<float>(std::sqrt(sum_sq / window_samples));
-            if (rms < min_rms) min_rms = rms;
-            if (rms > max_rms) max_rms = rms;
+            if (rms < 10.0f) continue;  // truly silent frame (device not yet open)
+            rms_vals.push_back(rms);
         }
 
-        if (min_rms < 1.0f) return max_rms > energy_threshold_;  // avoid divide-by-zero
+        const int n_valid = static_cast<int>(rms_vals.size());
+        if (n_valid < 2) return false;
+
+        std::sort(rms_vals.begin(), rms_vals.end());
+
+        // Trim bottom 25% and top 10%.
+        // Bottom 25%: mops up any late-arriving startup transition frames that
+        //             survived the skip (device ramp can extend past 1s on cold starts).
+        // Top 10%:    removes brief click/transient spikes.
+        // After both trims, steady noise has min≈max≈floor → ratio≈1.0 (fails).
+        // Real speech has loud peaks against quiet pauses → ratio >> 1.7 (passes).
+        const int trim_low  = std::max(1, n_valid / 4);   // 25%
+        const int trim_high = std::max(1, n_valid / 10);  // 10%
+        if (n_valid - trim_low - trim_high < 2) return false;
+
+        const float min_rms = rms_vals[trim_low];
+        const float max_rms = rms_vals[n_valid - 1 - trim_high];
+
+        RCLCPP_DEBUG(get_logger(),
+            "[VAD] skip=%d windows=%d valid=%d lo=%d hi=%d min=%.0f max=%.0f ratio=%.2f",
+            startup_skip, n_windows, n_valid, trim_low, trim_high, min_rms, max_rms,
+            max_rms / min_rms);
         return (max_rms / min_rms) > vad_snr_ratio_;
     }
 
@@ -196,7 +229,7 @@ private:
             "/tmp/jupiter_capture_" + std::to_string(getpid()) + ".raw";
         bool was_speaking = false;
 
-        while (running_) {
+        while (running_ && rclcpp::ok()) {
             if (is_speaking_.load()) {
                 was_speaking = true;
                 if (std::chrono::steady_clock::now() > speak_deadline_) {
@@ -239,8 +272,22 @@ private:
 
             if (text.empty() || text.size() < 3) {
                 RCLCPP_DEBUG(get_logger(), "[ASR] Short/empty result — skipping");
+                // Guard against stuck loops where steady background noise repeatedly
+                // passes VAD but Whisper finds no speech.  After 3 consecutive empty
+                // results, pause 4s so the noise condition can change.  The counter
+                // resets whenever a real transcription is published.
+                if (++consecutive_empty_asr_ >= 3) {
+                    RCLCPP_INFO(get_logger(),
+                        "[VAD] %d consecutive empty ASR results — pausing 4s to break noise loop",
+                        consecutive_empty_asr_);
+                    consecutive_empty_asr_ = 0;
+                    for (int i = 0; i < 40 && running_.load() && rclcpp::ok(); ++i) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                }
                 continue;
             }
+            consecutive_empty_asr_ = 0;
 
             if (is_noise_label(text)) {
                 RCLCPP_DEBUG(get_logger(), "[ASR] Noise label filtered: %s", text.c_str());
@@ -300,7 +347,7 @@ private:
         // Poll until record_seconds_ elapsed OR shutdown requested
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::seconds(record_seconds_);
-        while (running_.load()) {
+        while (running_.load() && rclcpp::ok()) {
             int status;
             if (waitpid(pid, &status, WNOHANG) != 0) {
                 capture_pid_.store(-1);
@@ -315,7 +362,7 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
 
-        if (!running_.load()) {
+        if (!running_.load() || !rclcpp::ok()) {
             ::kill(pid, SIGTERM);
             waitpid(pid, nullptr, 0);
             capture_pid_.store(-1);
@@ -337,6 +384,11 @@ private:
     // ── ASR ───────────────────────────────────────────────────────────────────
 
     std::string run_asr(const std::vector<float>& pcmf32) {
+        // Whisper requires at least 100ms (1600 samples at 16kHz) to run its
+        // log-mel spectrogram.  This should never trigger in normal operation since
+        // capture_chunk always returns a full record_seconds_ buffer, but guard
+        // defensively against edge cases (e.g. pw-record exits abnormally early).
+        if (pcmf32.size() < static_cast<size_t>(sample_rate_ / 10)) return {};
 
         whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wparams.language         = whisper_language_.c_str();
@@ -419,7 +471,28 @@ private:
             piper_binary_ + " --model " + piper_model_ +
             " --output_raw 2>/dev/null"
             " | pw-cat --playback --rate 22050 --format s16 --channels 1 - 2>/dev/null";
-        [[maybe_unused]] int rc = std::system(cmd.c_str());
+
+        // Fork instead of std::system() so we can kill the child on SIGINT
+        // without blocking the ROS spin thread for the full TTS duration.
+        const pid_t pid = ::fork();
+        if (pid < 0) return;
+        if (pid == 0) {
+            ::execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr);
+            ::_exit(1);
+        }
+        tts_pid_.store(pid);
+
+        bool finished = false;
+        while (running_.load() && rclcpp::ok()) {
+            int status;
+            if (::waitpid(pid, &status, WNOHANG) == pid) { finished = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (!finished) {
+            ::kill(pid, SIGTERM);
+            ::waitpid(pid, nullptr, 0);
+        }
+        tts_pid_.store(-1);
     }
 
     // ── Members ───────────────────────────────────────────────────────────────
@@ -430,11 +503,12 @@ private:
     std::string      whisper_language_{"en"};
     int              whisper_threads_{4};
 
-    // Capture
+    // Capture / TTS child PIDs — stored atomically so destructor can kill them
     int                    sample_rate_{16000};
     int                    record_seconds_{5};
     float                  energy_threshold_{300.0f};
     std::atomic<pid_t>     capture_pid_{-1};
+    std::atomic<pid_t>     tts_pid_{-1};
 
     // Piper TTS
     std::string piper_binary_;
@@ -451,6 +525,7 @@ private:
 
     // Temporal energy ratio VAD
     float vad_snr_ratio_{1.7f};
+    int   consecutive_empty_asr_{0};  // reset after good transcription; triggers cooldown at 3
 
     // ROS2
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    text_pub_;

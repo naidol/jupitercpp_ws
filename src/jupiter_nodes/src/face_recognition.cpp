@@ -364,12 +364,18 @@ private:
         return dot;   // both L2-normalised, so dot == cosine similarity
     }
 
-    std::string identify_face(const cv::Mat& frame) {
+    std::string identify_face(const cv::Mat& frame, cv::Rect& out_rect) {
         cv::Mat faces;
         detector_->setInputSize(frame.size());
         detector_->detect(frame, faces);
 
         if (faces.rows == 0) return {};
+
+        out_rect = cv::Rect(
+            static_cast<int>(faces.at<float>(0, 0)),
+            static_cast<int>(faces.at<float>(0, 1)),
+            static_cast<int>(faces.at<float>(0, 2)),
+            static_cast<int>(faces.at<float>(0, 3)));
 
         // Align the highest-confidence face
         cv::Mat aligned;
@@ -417,7 +423,12 @@ private:
 
         if (++frame_counter_ % recognition_interval_ != 0) return;
 
-        const std::string detected = identify_face(frame);
+        cv::Rect detected_rect;
+        const std::string detected = identify_face(frame, detected_rect);
+        if (!detected.empty()) {
+            std::lock_guard<std::mutex> lk(bbox_mutex_);
+            last_face_rect_ = detected_rect;
+        }
 
         if (detected.empty()) {
             // No face in frame at all
@@ -461,6 +472,10 @@ private:
             RCLCPP_WARN(get_logger(), "Snapshot requested but no frame available");
             return;
         }
+        // Save the raw frame — no annotation. Identity is provided to the VLM
+        // via the text bridge (for_user parameter in brain.cpp), so the
+        // face bbox+label is not needed and was confusing llava into thinking
+        // the label was part of a phone app UI.
         cv::imwrite(snapshot_path_, latest_frame_);
         RCLCPP_INFO(get_logger(), "Snapshot saved: %s", snapshot_path_.c_str());
     }
@@ -528,6 +543,8 @@ private:
 
     cv::Mat    latest_frame_;
     std::mutex frame_mutex_;
+    cv::Rect   last_face_rect_;
+    std::mutex bbox_mutex_;
     int        frame_counter_{0};
     const int  recognition_interval_{15};
 
