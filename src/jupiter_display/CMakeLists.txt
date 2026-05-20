@@ -17,6 +17,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Quick Qml)
 
@@ -26,6 +27,7 @@ ament_target_dependencies(jupiter_display
   rclcpp
   std_msgs
   sensor_msgs
+  geometry_msgs
   ament_index_cpp
 )
 

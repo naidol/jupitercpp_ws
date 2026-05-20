@@ -52,14 +52,18 @@ def generate_launch_description():
 
         # ── Hardware layer ────────────────────────────────────────────────────
 
-        # micro-ROS agent — bridges ESP32 to ROS2 (IMU, odometry, cmd_vel)
-        ExecuteProcess(
-            cmd=['ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
-                 'serial', '--dev', '/dev/jupiter_esp32', '-b', '115200'],
-            output='screen',
-            name='micro_ros_agent',
-            condition=IfCondition(enable_microros),
-        ),
+        # micro-ROS agent — delayed 10s to let camera and other nodes finish startup.
+        # ESP32 is now on USB-C Bus 001, fully isolated from Orbbec camera DMA on
+        # Bus 002, so no contention risk. 10s is conservative headroom only.
+        TimerAction(period=10.0, actions=[
+            ExecuteProcess(
+                cmd=['ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
+                     'serial', '--dev', '/dev/jupiter_esp32', '-b', '115200'],
+                output='screen',
+                name='micro_ros_agent',
+                condition=IfCondition(enable_microros),
+            ),
+        ]),
 
         # ── Navigation layer — only when enable_slam:=true ────────────────────
 
