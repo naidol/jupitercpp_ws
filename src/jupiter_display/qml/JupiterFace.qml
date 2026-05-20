@@ -13,15 +13,6 @@ Window {
     color: "#0A0A0F"
     title: "Jupiter"
 
-    // ── Auto-return to LISTENING after TTS finishes ───────────────────────────
-    Timer {
-        id: speakingTimer
-        interval: bridge.speakingMs
-        running: bridge.state === 2
-        repeat: false
-        onTriggered: bridge.returnToListening()
-    }
-
     // ── Top status bar ─────────────────────────────────────────────────────────
     Rectangle {
         id: topBar

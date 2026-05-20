@@ -10,6 +10,7 @@
 #include <sensor_msgs/msg/battery_state.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
@@ -94,7 +95,6 @@ class DisplayBridge : public QObject {
     Q_PROPERTY(QString currentUser   READ currentUser   NOTIFY currentUserChanged)
     Q_PROPERTY(QString lastUtterance READ lastUtterance NOTIFY lastUtteranceChanged)
     Q_PROPERTY(QString lastResponse  READ lastResponse  NOTIFY lastResponseChanged)
-    Q_PROPERTY(int     speakingMs    READ speakingMs    NOTIFY speakingMsChanged)
 
     Q_PROPERTY(float   batteryVoltage READ batteryVoltage NOTIFY batteryVoltageChanged)
     Q_PROPERTY(float   batteryPct     READ batteryPct     NOTIFY batteryPctChanged)
@@ -114,7 +114,6 @@ public:
     QString currentUser()    const { return currentUser_; }
     QString lastUtterance()  const { return lastUtterance_; }
     QString lastResponse()   const { return lastResponse_; }
-    int     speakingMs()     const { return speaking_ms_; }
     float   batteryVoltage() const { return battery_voltage_; }
     float   batteryPct()     const { return battery_pct_; }
     float   cpuTemp()        const { return cpu_temp_; }
@@ -131,7 +130,6 @@ signals:
     void currentUserChanged();
     void lastUtteranceChanged();
     void lastResponseChanged();
-    void speakingMsChanged();
     void batteryVoltageChanged();
     void batteryPctChanged();
     void cpuTempChanged();
@@ -155,10 +153,7 @@ public slots:
     }
     void setLastResponse(const QString& t) {
         lastResponse_ = t;
-        const int words = t.split(' ', Qt::SkipEmptyParts).size();
-        speaking_ms_ = words * 400 + 2500;
         emit lastResponseChanged();
-        emit speakingMsChanged();
     }
     void returnToListening() { setState(STATE_LISTENING); }
 
@@ -198,7 +193,6 @@ private:
     QString currentUser_{"Unknown"};
     QString lastUtterance_;
     QString lastResponse_;
-    int     speaking_ms_{5000};
 
     float   battery_voltage_{0.0f};
     float   battery_pct_{0.0f};
@@ -262,6 +256,14 @@ public:
                 QMetaObject::invokeMethod(bridge_, "setBatteryPct",
                     Qt::QueuedConnection,
                     Q_ARG(float, msg->percentage * 100.0f));
+            });
+
+        tts_done_sub_ = create_subscription<std_msgs::msg::Empty>(
+            "/voice/tts_done", 1,
+            [this](std_msgs::msg::Empty::SharedPtr) {
+                QMetaObject::invokeMethod(bridge_, "setState",
+                    Qt::QueuedConnection,
+                    Q_ARG(int, STATE_LISTENING));
             });
 
         // ── System health subscriptions ───────────────────────────────────────
@@ -329,6 +331,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr             user_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr             utterance_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr             response_sub_;
+    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr              tts_done_sub_;
     rclcpp::Subscription<sensor_msgs::msg::BatteryState>::SharedPtr    battery_sub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr      camera_info_sub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr       scan_sub_;

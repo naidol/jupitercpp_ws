@@ -6,6 +6,7 @@
 // /voice/response_text → piper TTS (pw-cat)
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include "whisper.h"
@@ -84,7 +85,8 @@ public:
         declare_parameters();
         init_whisper();
 
-        text_pub_ = create_publisher<std_msgs::msg::String>("/voice/raw_text", 10);
+        text_pub_     = create_publisher<std_msgs::msg::String>("/voice/raw_text", 10);
+        tts_done_pub_ = create_publisher<std_msgs::msg::Empty>("/voice/tts_done", 1);
 
         response_sub_ = create_subscription<std_msgs::msg::String>(
             "/voice/response_text", 10,
@@ -473,6 +475,8 @@ private:
         speak(text);
         // Brief pause so room echo from TTS playback dies down before next capture
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // Signal display to return to LISTENING — exact timing, no word-count estimate
+        tts_done_pub_->publish(std_msgs::msg::Empty{});
         // Reset deadline so a stale timeout from a previous query doesn't fire
         // the watchdog the next time is_speaking_ goes true (e.g. an autonomous greeting)
         speak_deadline_ = std::chrono::steady_clock::time_point::max();
@@ -546,6 +550,7 @@ private:
 
     // ROS2
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    text_pub_;
+    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr     tts_done_pub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr response_sub_;
 };
 
