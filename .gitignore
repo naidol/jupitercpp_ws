@@ -10,6 +10,9 @@ __pycache__/
 llama.cpp/
 piper_tts/
 whisper.cpp/
+sherpa-onnx/
+sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/
+sherpa-onnx*.tar.bz2
 
 # ONNX models and TensorRT engine cache
 models/
