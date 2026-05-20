@@ -171,7 +171,7 @@ private:
     bool vad_has_speech(const std::vector<int16_t>& pcm) const {
         const int window_samples = sample_rate_ / 10;  // 100ms
         const int n_windows      = static_cast<int>(pcm.size()) / window_samples;
-        if (n_windows < 4) return true;  // buffer too short to judge — pass through
+        if (n_windows < 4) return false;  // buffer too short to make a VAD decision — reject
 
         // Skip the first second of every recording.  pw-record has a ~0.5-1.0s
         // startup ramp: output file opens, audio device initialises, then noise
@@ -216,9 +216,9 @@ private:
         const float max_rms = rms_vals[n_valid - 1 - trim_high];
 
         RCLCPP_DEBUG(get_logger(),
-            "[VAD] skip=%d windows=%d valid=%d lo=%d hi=%d min=%.0f max=%.0f ratio=%.2f",
-            startup_skip, n_windows, n_valid, trim_low, trim_high, min_rms, max_rms,
-            max_rms / min_rms);
+            "[VAD] skip=%d valid=%d lo=%d hi=%d min=%.0f max=%.0f ratio=%.2f thr=%.1f",
+            startup_skip, n_valid, trim_low, trim_high, min_rms, max_rms,
+            max_rms / min_rms, vad_snr_ratio_);
         return (max_rms / min_rms) > vad_snr_ratio_;
     }
 
@@ -249,6 +249,13 @@ private:
             if (buf.empty()) continue;
 
             if (is_speaking_.load()) continue;
+
+            // Reject captures shorter than 1 second — PipeWire briefly glitches after
+            // TTS (pw-cat) finishes, causing pw-record to exit early with only 200-300ms
+            // of audio.  These short buffers bypass the temporal VAD (n_windows < 4
+            // early-return path) and hit Whisper with nothing to transcribe, triggering
+            // the consecutive-empty stuck loop.
+            if (buf.size() < static_cast<size_t>(sample_rate_)) continue;
 
             const float energy = compute_rms_energy(buf);
             RCLCPP_DEBUG(get_logger(), "[VAD] RMS %.0f  threshold %.0f", energy, energy_threshold_);
@@ -355,7 +362,13 @@ private:
             }
             if (std::chrono::steady_clock::now() >= deadline) {
                 ::kill(pid, SIGTERM);
-                waitpid(pid, nullptr, 0);
+                // Normal end-of-chunk: SIGTERM is enough, pw-record exits quickly.
+                // Use a non-blocking poll so SA_RESTART can't pin this thread.
+                for (int i = 0; i < 20; ++i) {
+                    int st;
+                    if (::waitpid(pid, &st, WNOHANG) != 0) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
                 capture_pid_.store(-1);
                 break;
             }
@@ -363,7 +376,11 @@ private:
         }
 
         if (!running_.load() || !rclcpp::ok()) {
-            ::kill(pid, SIGTERM);
+            // Shutdown path — SIGKILL guarantees immediate termination so that
+            // waitpid() returns in microseconds.  SA_RESTART (set by rclcpp's
+            // signal handler) would cause a blocking waitpid() to never return
+            // after SIGTERM, hanging the audio thread indefinitely.
+            ::kill(pid, SIGKILL);
             waitpid(pid, nullptr, 0);
             capture_pid_.store(-1);
             std::remove(tmp_file.c_str());
@@ -489,7 +506,7 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
         if (!finished) {
-            ::kill(pid, SIGTERM);
+            ::kill(pid, SIGKILL);  // SIGKILL on shutdown — SA_RESTART blocks SIGTERM+waitpid
             ::waitpid(pid, nullptr, 0);
         }
         tts_pid_.store(-1);

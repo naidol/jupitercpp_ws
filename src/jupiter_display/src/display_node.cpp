@@ -171,10 +171,12 @@ int main(int argc, char** argv) {
 
     DisplayBridge bridge;
 
-    // ROS2 spin in background thread — QMetaObject posts safely to Qt main thread
+    // ROS2 spin in background thread — QMetaObject posts safely to Qt main thread.
+    // Capture node by value so the shared_ptr ref-count keeps the node alive for
+    // the thread's lifetime.  Do NOT detach — detached threads run past main()'s
+    // return, causing rclcpp/DDS objects to be used after their destructors fire.
     auto node = std::make_shared<JupiterDisplayNode>(&bridge);
-    std::thread ros_thread([&node]() { rclcpp::spin(node); });
-    ros_thread.detach();
+    std::thread ros_thread([node]() { rclcpp::spin(node); });
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("bridge", &bridge);
@@ -213,14 +215,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Poll rclcpp::ok() so the Qt event loop exits when ROS2 shuts down (Ctrl+C)
+    // Poll rclcpp::ok() so the Qt event loop exits when ROS2 shuts down (Ctrl+C).
+    // 50ms interval: responds within one tick of SIGINT instead of up to 200ms.
     QTimer shutdown_timer;
     QObject::connect(&shutdown_timer, &QTimer::timeout, [&app]() {
         if (!rclcpp::ok()) app.quit();
     });
-    shutdown_timer.start(200);
+    shutdown_timer.start(50);
 
     const int result = app.exec();
-    rclcpp::shutdown();
+    rclcpp::shutdown();           // signals spin() to stop (idempotent if already called)
+    if (ros_thread.joinable()) ros_thread.join();  // wait for spin() to return cleanly
     return result;
 }
