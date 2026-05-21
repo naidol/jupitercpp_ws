@@ -10,4 +10,8 @@ install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(PROGRAMS scripts/lidar_watchdog.sh
+  DESTINATION share/${PROJECT_NAME}/scripts
+)
+
 ament_package()

@@ -20,7 +20,6 @@ import os
 
 def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
-    ldlidar_dir  = get_package_share_directory('ldlidar_stl_ros2')
 
     mode           = LaunchConfiguration('mode')
     map_file       = LaunchConfiguration('map')
@@ -52,10 +51,10 @@ def generate_launch_description():
 
         # ── Hardware layer ────────────────────────────────────────────────────
 
-        # micro-ROS agent — delayed 10s to let camera and other nodes finish startup.
-        # ESP32 is now on USB-C Bus 001, fully isolated from Orbbec camera DMA on
-        # Bus 002, so no contention risk. 10s is conservative headroom only.
-        TimerAction(period=10.0, actions=[
+        # micro-ROS agent — delayed 70s to let camera and all other nodes finish startup.
+        # Camera init in SLAM mode (depth enabled) can take up to 25s on cold boot.
+        # 70s gives safe headroom for camera, LiDAR, voice, and face recognition to settle.
+        TimerAction(period=70.0, actions=[
             ExecuteProcess(
                 cmd=['ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
                      'serial', '--dev', '/dev/jupiter_esp32', '-b', '115200'],
@@ -92,12 +91,30 @@ def generate_launch_description():
             ),
         ]),
 
-        # LD19 LiDAR — only needed for SLAM/Nav
-        TimerAction(period=6.0, actions=[
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    os.path.join(ldlidar_dir, 'launch', 'ld19.launch.py')
-                ),
+        # LD19 LiDAR — only needed for SLAM/Nav.
+        # Delayed 28s: camera starts at 4s but takes up to 25s device-selection in
+        # SLAM mode (depth disabled = ~38s total). Starting LiDAR before camera
+        # settles causes serial FIFO starvation — SDK loses frame sync after first scan.
+        #
+        # Static TF (base_footprint → base_laser) — runs permanently, no restart needed.
+        TimerAction(period=28.0, actions=[
+            Node(
+                package='tf2_ros',
+                executable='static_transform_publisher',
+                name='base_link_to_base_laser_ld19',
+                arguments=['0.06', '0', '0.13', '0', '0', '0', 'base_footprint', 'base_laser'],
+                condition=IfCondition(enable_slam),
+            ),
+        ]),
+        # LiDAR watchdog — starts ldlidar_stl_ros2_node and auto-restarts it when
+        # /scan times out. Whisper GPU inference causes tegra-xusb DMA stalls that
+        # drop cp210x serial bytes, breaking LD19 SDK frame sync (no self-recovery).
+        # Delayed 30s: 2s after TF publisher to let it settle before first scan arrives.
+        TimerAction(period=30.0, actions=[
+            ExecuteProcess(
+                cmd=[os.path.join(bringup_dir, 'scripts', 'lidar_watchdog.sh')],
+                output='screen',
+                name='lidar_watchdog',
                 condition=IfCondition(enable_slam),
             ),
         ]),
@@ -130,10 +147,11 @@ def generate_launch_description():
             ),
         ]),
 
-        # Orbbec Gemini 336 — SLAM/Nav mode: color + depth enabled.
-        # Depth is required for Nav2 costmaps and AprilTag docking distance.
-        # LiDAR is also running in this mode, so Whisper is the primary USB
-        # contender — acceptable since navigation reduces voice interaction.
+        # Orbbec Gemini 336 — SLAM mode: color-only, same as AI-only mode.
+        # Depth disabled: slam_toolbox only needs /scan (LiDAR), not depth frames.
+        # Enabling depth in SLAM mode causes OrbbecSDK to take 90s to initialise
+        # (vs 2.5s color-only), which starves the LiDAR serial FIFO during startup.
+        # Re-enable depth here only when Nav2 navigation with costmaps is needed.
         TimerAction(period=4.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -147,7 +165,7 @@ def generate_launch_description():
                     'color_height':               '480',
                     'color_fps':                  '15',
                     'color_format':               'MJPG',
-                    'enable_depth':               'true',
+                    'enable_depth':               'false',
                     'enable_ir':                  'false',
                     'enable_point_cloud':         'false',
                     'enable_colored_point_cloud': 'false',
