@@ -51,10 +51,10 @@ def generate_launch_description():
 
         # ── Hardware layer ────────────────────────────────────────────────────
 
-        # micro-ROS agent — delayed 70s to let camera and all other nodes finish startup.
-        # Camera init in SLAM mode (depth enabled) can take up to 25s on cold boot.
-        # 70s gives safe headroom for camera, LiDAR, voice, and face recognition to settle.
-        TimerAction(period=70.0, actions=[
+        # micro-ROS agent — delayed 15s to let camera and voice/brain nodes start.
+        # Camera now initialises in ~3s (ReSpeaker isolated on separate hub branch).
+        # 15s gives safe headroom for camera (~7s ready) and AI nodes (~10s settled).
+        TimerAction(period=15.0, actions=[
             ExecuteProcess(
                 cmd=['ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
                      'serial', '--dev', '/dev/jupiter_esp32', '-b', '115200'],
