@@ -7,6 +7,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <sensor_msgs/msg/battery_state.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
@@ -106,6 +107,7 @@ class DisplayBridge : public QObject {
     Q_PROPERTY(bool    voiceOnline    READ voiceOnline    NOTIFY voiceOnlineChanged)
     Q_PROPERTY(float   linearVel      READ linearVel      NOTIFY linearVelChanged)
     Q_PROPERTY(int     robotMode      READ robotMode      NOTIFY robotModeChanged)
+    Q_PROPERTY(bool    sleeping       READ sleeping       NOTIFY sleepingChanged)
 
 public:
     explicit DisplayBridge(QObject* parent = nullptr) : QObject(parent) {}
@@ -124,6 +126,7 @@ public:
     bool    voiceOnline()    const { return voice_online_; }
     float   linearVel()      const { return linear_vel_; }
     int     robotMode()      const { return robot_mode_; }
+    bool    sleeping()       const { return sleeping_; }
 
 signals:
     void stateChanged();
@@ -140,6 +143,7 @@ signals:
     void voiceOnlineChanged();
     void linearVelChanged();
     void robotModeChanged();
+    void sleepingChanged();
 
 public slots:
     void setState(int s) {
@@ -187,6 +191,9 @@ public slots:
     void setRobotMode(int m) {
         if (robot_mode_ != m) { robot_mode_ = m; emit robotModeChanged(); }
     }
+    void setSleeping(bool b) {
+        if (sleeping_ != b) { sleeping_ = b; emit sleepingChanged(); }
+    }
 
 private:
     int     state_{STATE_LISTENING};
@@ -204,6 +211,7 @@ private:
     bool    voice_online_{false};
     float   linear_vel_{0.0f};
     int     robot_mode_{MODE_INTERACTION};
+    bool    sleeping_{false};
 };
 
 // ── JupiterDisplayNode ────────────────────────────────────────────────────────
@@ -264,6 +272,14 @@ public:
                 QMetaObject::invokeMethod(bridge_, "setState",
                     Qt::QueuedConnection,
                     Q_ARG(int, STATE_LISTENING));
+            });
+
+        sleep_sub_ = create_subscription<std_msgs::msg::Bool>(
+            "/jupiter/sleeping", 10,
+            [this](std_msgs::msg::Bool::SharedPtr msg) {
+                QMetaObject::invokeMethod(bridge_, "setSleeping",
+                    Qt::QueuedConnection,
+                    Q_ARG(bool, msg->data));
             });
 
         // ── System health subscriptions ───────────────────────────────────────
@@ -336,6 +352,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr      camera_info_sub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr       scan_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr         cmd_vel_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr               sleep_sub_;
     rclcpp::TimerBase::SharedPtr                                       sys_timer_;
 
     std::string cpu_thermal_path_;

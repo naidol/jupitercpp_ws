@@ -223,7 +223,17 @@ Window {
                 var cx = width / 2;
                 var state = bridge.state;
 
-                if (state === 2) {
+                if (bridge.sleeping) {
+                    // Flat closed line — neutral sleeping expression
+                    ctx.beginPath();
+                    ctx.moveTo(cx - width * 0.16, height * 0.50);
+                    ctx.lineTo(cx + width * 0.16, height * 0.50);
+                    ctx.strokeStyle = "#333355";
+                    ctx.lineWidth = height * 0.07;
+                    ctx.lineCap = "round";
+                    ctx.stroke();
+
+                } else if (state === 2) {
                     var ow = width * 0.42;
                     var oh = height * (0.28 + openAmount * 0.45);
                     var oy = height * 0.38;
@@ -280,7 +290,8 @@ Window {
 
             Connections {
                 target: bridge
-                function onStateChanged() { mouthCanvas.requestPaint(); }
+                function onStateChanged()    { mouthCanvas.requestPaint(); }
+                function onSleepingChanged() { mouthCanvas.requestPaint(); }
             }
         }
     }
@@ -288,7 +299,7 @@ Window {
     // ── Eye blink animations ──────────────────────────────────────────────────
     SequentialAnimation {
         id: blinkAnim
-        running: bridge.state !== 1
+        running: bridge.state !== 1 && !bridge.sleeping
         loops: Animation.Infinite
 
         PauseAnimation { duration: 2800 }
@@ -311,17 +322,27 @@ Window {
         }
     }
 
+    // Sleep — slowly close eyes to a thin slit and hold
     NumberAnimation {
         targets: [leftBlinkScale, rightBlinkScale]
         property: "yScale"
-        running: bridge.state === 1
-        to: 0.45; duration: 300
+        running: bridge.sleeping
+        to: 0.06; duration: 800
+        easing.type: Easing.InOutQuad
+    }
+    // Wake — open eyes
+    NumberAnimation {
+        targets: [leftBlinkScale, rightBlinkScale]
+        property: "yScale"
+        running: !bridge.sleeping && bridge.state !== 1
+        to: 1.0; duration: 400
+        easing.type: Easing.OutQuad
     }
     NumberAnimation {
         targets: [leftBlinkScale, rightBlinkScale]
         property: "yScale"
-        running: bridge.state !== 1
-        to: 1.0; duration: 200
+        running: bridge.state === 1 && !bridge.sleeping
+        to: 0.45; duration: 300
     }
 
     // ── User greeting ─────────────────────────────────────────────────────────
@@ -391,11 +412,12 @@ Window {
             Rectangle {
                 width: 10; height: 10; radius: 5
                 anchors.verticalCenter: parent.verticalCenter
-                color: bridge.state === 0 ? "#00FF7F" :
-                       bridge.state === 1 ? "#FFA500" : "#00AAFF"
+                color: bridge.sleeping    ? "#444466"   :
+                       bridge.state === 0 ? "#00FF7F"   :
+                       bridge.state === 1 ? "#FFA500"   : "#00AAFF"
 
                 SequentialAnimation on opacity {
-                    running: bridge.state === 1
+                    running: bridge.state === 1 && !bridge.sleeping
                     loops: Animation.Infinite
                     NumberAnimation { to: 0.2; duration: 400 }
                     NumberAnimation { to: 1.0; duration: 400 }
@@ -404,12 +426,14 @@ Window {
 
             Text {
                 anchors.verticalCenter: parent.verticalCenter
-                text: bridge.state === 0 ? "LISTENING" :
+                text: bridge.sleeping    ? "SLEEPING"   :
+                      bridge.state === 0 ? "LISTENING"  :
                       bridge.state === 1 ? "PROCESSING" : "SPEAKING"
                 font.pixelSize: 13
                 font.letterSpacing: 0.8
-                color: bridge.state === 0 ? "#00FF7F" :
-                       bridge.state === 1 ? "#FFA500" : "#00AAFF"
+                color: bridge.sleeping    ? "#444466"   :
+                       bridge.state === 0 ? "#00FF7F"   :
+                       bridge.state === 1 ? "#FFA500"   : "#00AAFF"
             }
         }
 

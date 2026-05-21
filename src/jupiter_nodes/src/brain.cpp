@@ -12,6 +12,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/bool.hpp>
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -151,6 +152,7 @@ public:
         response_pub_  = create_publisher<std_msgs::msg::String>("/voice/response_text", 10);
         register_pub_  = create_publisher<std_msgs::msg::String>("/vision/register", 10);
         trigger_pub_   = create_publisher<std_msgs::msg::String>("/vision/trigger", 10);
+        sleep_pub_     = create_publisher<std_msgs::msg::Bool>("/jupiter/sleeping", 10);
 
         text_sub_ = create_subscription<std_msgs::msg::String>(
             "/voice/raw_text", 10,
@@ -221,6 +223,8 @@ private:
 
         if (!previous.empty()) save_history(previous);
         load_history(current_user_);
+
+        if (sleeping_) return;
 
         if (incoming != "Unknown" || previous != "Unknown") {
             greet_user(incoming, previous);
@@ -322,6 +326,7 @@ private:
         if (sleeping_) {
             if (is_wake_phrase(user_text)) {
                 sleeping_.store(false);
+                publish_sleep_state(false);
                 RCLCPP_INFO(get_logger(), "Wake phrase detected — resuming");
                 speak("I am awake. How can I help?");
             }
@@ -329,6 +334,7 @@ private:
         }
         if (is_sleep_phrase(user_text)) {
             sleeping_.store(true);
+            publish_sleep_state(true);
             RCLCPP_INFO(get_logger(), "Sleep phrase detected — entering sleep mode");
             speak("Goodnight. Say wake up or hey Jupiter when you need me.");
             return;
@@ -653,6 +659,12 @@ private:
         response_pub_->publish(out);
     }
 
+    void publish_sleep_state(bool sleeping) {
+        std_msgs::msg::Bool msg;
+        msg.data = sleeping;
+        sleep_pub_->publish(msg);
+    }
+
     // ── Members ───────────────────────────────────────────────────────────────
 
     std::string llama_url_;
@@ -680,6 +692,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    response_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    register_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    trigger_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr      sleep_pub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr text_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr user_sub_;
 };
