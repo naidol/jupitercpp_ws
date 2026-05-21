@@ -114,6 +114,52 @@ bool is_wake_phrase(const std::string& text) {
     return false;
 }
 
+// Extract a first name from natural speech — strips common preambles and rejects
+// function words so "My name is Logan" and "I am Logan" both yield "Logan".
+std::string extract_name(const std::string& text) {
+    std::string lower = text;
+    for (char& c : lower) c = static_cast<char>(std::tolower(c));
+
+    static const std::vector<std::string> kPrefixes = {
+        "hi my name is ", "hi i am ", "hi i'm ",
+        "my name is ", "my name's ", "i am ", "i'm ",
+        "call me ", "it's ", "its ", "the name is ",
+        "name is ", "this is ", "just "
+    };
+
+    size_t name_start = 0;
+    for (const auto& prefix : kPrefixes) {
+        const size_t pos = lower.find(prefix);
+        if (pos != std::string::npos) {
+            name_start = pos + prefix.size();
+            break;
+        }
+    }
+
+    // Extract first alphabetic word from name_start
+    std::string name;
+    for (size_t i = name_start; i < text.size(); ++i) {
+        if (std::isalpha(static_cast<unsigned char>(text[i]))) {
+            name.push_back(text[i]);
+        } else if (!name.empty()) {
+            break;
+        }
+    }
+
+    if (name.empty()) return {};
+    name[0] = static_cast<char>(std::toupper(name[0]));
+
+    // Reject common function words that are not names
+    static const std::vector<std::string> kNotNames = {
+        "I", "My", "Me", "The", "A", "An", "It", "Its",
+        "Hi", "Hello", "Hey", "Yes", "Ok", "Okay", "Sure", "Well", "Just"
+    };
+    for (const auto& w : kNotNames) {
+        if (name == w) return {};
+    }
+    return name;
+}
+
 // Visual intent keywords — any match routes to the VLM
 bool is_visual_query(const std::string& text) {
     std::string lower = text;
@@ -621,27 +667,32 @@ private:
             return s;
         }();
 
-        if (lower.find("no") != std::string::npos ||
-            lower.find("nope") != std::string::npos ||
-            lower.find("not now") != std::string::npos) {
+        // Word-boundary check — avoids "no" matching inside "noel", "know", "normal"
+        auto contains_word = [&](const std::string& word) {
+            size_t pos = lower.find(word);
+            while (pos != std::string::npos) {
+                const bool left_ok  = (pos == 0 || !std::isalpha(lower[pos - 1]));
+                const bool right_ok = (pos + word.size() >= lower.size() ||
+                                       !std::isalpha(lower[pos + word.size()]));
+                if (left_ok && right_ok) return true;
+                pos = lower.find(word, pos + 1);
+            }
+            return false;
+        };
+
+        if (contains_word("no") || contains_word("nope") || contains_word("not now") ||
+            lower.find("don't want") != std::string::npos ||
+            lower.find("do not want") != std::string::npos) {
             awaiting_registration_consent_ = false;
             speak("No problem! I will call you Guest. How can I help you today?");
             return;
         }
 
-        std::string name;
-        for (char c : user_text) {
-            if (std::isalpha(c) || c == ' ') name.push_back(c);
-        }
-        const auto first = name.find_first_not_of(' ');
-        if (first == std::string::npos) {
+        const std::string name = extract_name(user_text);
+        if (name.empty()) {
             speak("Sorry, I did not catch your name. Could you say it again?");
             return;
         }
-        name = name.substr(first);
-        const auto space = name.find(' ');
-        if (space != std::string::npos) name = name.substr(0, space);
-        if (!name.empty()) name[0] = static_cast<char>(std::toupper(name[0]));
 
         speak("Nice to meet you, " + name + "! Let me take a look at you to remember your face.");
 
@@ -650,6 +701,7 @@ private:
         register_pub_->publish(reg_msg);
 
         awaiting_registration_consent_ = false;
+        current_user_ = name;  // prevent user_callback double-greeting on next 1Hz tick
         speak("Done! I will remember you as " + name + " from now on. How can I help?");
     }
 
