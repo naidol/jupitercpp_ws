@@ -166,6 +166,11 @@ public:
     }
 
     ~JupiterBrain() {
+        // Wait for any in-flight LLM response so history is complete before saving
+        while (llm_busy_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        save_history(current_user_);
         if (llm_thread_.joinable()) llm_thread_.join();
         curl_global_cleanup();
     }
@@ -277,14 +282,13 @@ private:
         }
     }
 
-    void save_history(const std::string& user) {
-        if (user == "Unknown" || user == "Guest" || user.empty()) return;
-
-        std::lock_guard<std::mutex> lock(history_mutex_);
-        if (history_.empty()) return;
-
+    // Atomic write: write to .tmp then rename — prevents partial-write corruption on Ctrl+C.
+    // Caller must hold history_mutex_.
+    void write_history_atomic(const std::string& user) {
         fs::create_directories(memory_dir_);
         const fs::path path = fs::path(memory_dir_) / (user + ".json");
+        const fs::path tmp  = fs::path(memory_dir_) / (user + ".json.tmp");
+
         json data;
         data["user"]      = user;
         data["last_seen"] = std::to_string(std::time(nullptr));
@@ -292,8 +296,17 @@ private:
         for (const auto& m : history_) {
             data["history"].push_back({{"role", m.role}, {"content", m.content}});
         }
-        std::ofstream f(path);
-        f << data.dump(4);
+        { std::ofstream f(tmp); f << data.dump(4); }
+        fs::rename(tmp, path);
+    }
+
+    void save_history(const std::string& user) {
+        if (user == "Unknown" || user == "Guest" || user.empty()) return;
+
+        std::lock_guard<std::mutex> lock(history_mutex_);
+        if (history_.empty()) return;
+
+        write_history_atomic(user);
         RCLCPP_INFO(get_logger(), "Saved %zu history messages for %s",
             history_.size(), user.c_str());
     }
@@ -590,18 +603,7 @@ private:
         if (is_visual) return;
         if (current_user_ == "Unknown" || current_user_ == "Guest") return;
 
-        // Auto-save after every exchange
-        fs::create_directories(memory_dir_);
-        const fs::path path = fs::path(memory_dir_) / (current_user_ + ".json");
-        json data;
-        data["user"]      = current_user_;
-        data["last_seen"] = std::to_string(std::time(nullptr));
-        data["history"]   = json::array();
-        for (const auto& m : history_) {
-            data["history"].push_back({{"role", m.role}, {"content", m.content}});
-        }
-        std::ofstream f(path);
-        f << data.dump(4);
+        write_history_atomic(current_user_);
     }
 
     // ── Guest registration flow ───────────────────────────────────────────────
