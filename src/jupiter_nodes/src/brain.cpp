@@ -89,6 +89,30 @@ std::string base64_encode(const std::vector<uint8_t>& data) {
     return result;
 }
 
+bool is_sleep_phrase(const std::string& text) {
+    std::string lower = text;
+    for (char& c : lower) c = static_cast<char>(std::tolower(c));
+    static const std::vector<std::string> kPhrases = {
+        "go to sleep", "jupiter sleep", "goodnight jupiter", "sleep mode"
+    };
+    for (const auto& p : kPhrases) {
+        if (lower.find(p) != std::string::npos) return true;
+    }
+    return false;
+}
+
+bool is_wake_phrase(const std::string& text) {
+    std::string lower = text;
+    for (char& c : lower) c = static_cast<char>(std::tolower(c));
+    static const std::vector<std::string> kPhrases = {
+        "wake up", "hey jupiter", "jupiter wake up"
+    };
+    for (const auto& p : kPhrases) {
+        if (lower.find(p) != std::string::npos) return true;
+    }
+    return false;
+}
+
 // Visual intent keywords — any match routes to the VLM
 bool is_visual_query(const std::string& text) {
     std::string lower = text;
@@ -281,6 +305,21 @@ private:
         if (user_text.empty()) return;
 
         RCLCPP_INFO(get_logger(), "[USER/%s] %s", current_user_.c_str(), user_text.c_str());
+
+        if (sleeping_) {
+            if (is_wake_phrase(user_text)) {
+                sleeping_.store(false);
+                RCLCPP_INFO(get_logger(), "Wake phrase detected — resuming");
+                speak("I am awake. How can I help?");
+            }
+            return;
+        }
+        if (is_sleep_phrase(user_text)) {
+            sleeping_.store(true);
+            RCLCPP_INFO(get_logger(), "Sleep phrase detected — entering sleep mode");
+            speak("Goodnight. Say wake up or hey Jupiter when you need me.");
+            return;
+        }
 
         if (awaiting_registration_consent_) {
             handle_registration_flow(user_text);
@@ -628,6 +667,7 @@ private:
     bool        awaiting_registration_consent_{false};
     std::string pending_registration_name_;
 
+    std::atomic<bool> sleeping_{false};
     std::atomic<bool> llm_busy_{false};
     std::thread       llm_thread_;
 
