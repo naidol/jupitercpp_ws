@@ -219,7 +219,7 @@ def generate_launch_description():
                 name='jupiter_voice',
                 output='screen',
                 parameters=[{
-                    'energy_threshold': 500.0,   # coarse pre-filter; VAD catches steady noise above this
+                    'energy_threshold': 300.0,   # coarse pre-filter; VAD catches steady noise above this
                     'record_seconds':   4,        # 4s window: speech dominates; 8s let startup zeros break VAD
                     'vad_snr_ratio':    1.7,      # peak/trough RMS ratio: HVAC≈1.1, speech≈2-10
                 }],

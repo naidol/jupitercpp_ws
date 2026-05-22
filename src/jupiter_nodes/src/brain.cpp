@@ -185,6 +185,21 @@ bool is_visual_query(const std::string& text) {
     return false;
 }
 
+// Register-intent: known user wants to register someone new standing in front of the camera.
+bool is_register_command(const std::string& text) {
+    std::string lower = text;
+    for (char& c : lower) c = static_cast<char>(std::tolower(c));
+    static const std::vector<std::string> kKeywords = {
+        "register", "add a user", "add new user", "add user",
+        "remember this person", "remember her", "remember him",
+        "who is this", "who is she", "who is he",
+    };
+    for (const auto& kw : kKeywords) {
+        if (lower.find(kw) != std::string::npos) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 
@@ -375,6 +390,11 @@ private:
                 publish_sleep_state(false);
                 RCLCPP_INFO(get_logger(), "Wake phrase detected — resuming");
                 speak("I am awake. How can I help?");
+            } else {
+                // Ack the voice node so it clears is_speaking_ immediately rather
+                // than waiting out the 90-second response timeout.
+                std_msgs::msg::String ack;
+                response_pub_->publish(ack);
             }
             return;
         }
@@ -388,6 +408,15 @@ private:
 
         if (awaiting_registration_consent_) {
             handle_registration_flow(user_text);
+            return;
+        }
+
+        // Known user explicitly asking to register a new person in front of the camera
+        if (is_register_command(user_text) && current_user_ != "Unknown" && current_user_ != "Guest") {
+            RCLCPP_INFO(get_logger(), "Register command from %s — prompting for new user", current_user_.c_str());
+            awaiting_registration_consent_ = true;
+            speak("Sure! Please have the person stand clearly in front of me. "
+                  "Hello there! Would you like me to register you? Please say yes or no.");
             return;
         }
 

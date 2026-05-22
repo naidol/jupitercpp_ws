@@ -414,8 +414,11 @@ int main(int argc, char** argv) {
     }
 
     QTimer shutdown_timer;
-    QObject::connect(&shutdown_timer, &QTimer::timeout, [&app]() {
-        if (!rclcpp::ok()) app.quit();
+    QObject::connect(&shutdown_timer, &QTimer::timeout, [&app, window]() {
+        if (!rclcpp::ok()) {
+            if (window) window->hide();
+            app.quit();
+        }
     });
     shutdown_timer.start(50);
 

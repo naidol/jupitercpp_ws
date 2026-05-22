@@ -390,10 +390,26 @@ private:
 
         for (const auto& profile : profiles_) {
             const float score = cosine_sim(embedding, profile.embedding);
+            RCLCPP_DEBUG(get_logger(), "[MATCH] %s similarity=%.4f threshold=%.2f",
+                         profile.name.c_str(), score, match_threshold_);
             if (score > best_score) {
                 best_score = score;
                 best_name  = profile.name;
             }
+        }
+
+        if (best_name != "Guest") {
+            RCLCPP_INFO(get_logger(), "[MATCH] Matched %s score=%.4f", best_name.c_str(), best_score);
+        } else {
+            // Log the closest miss so we can tune the threshold
+            float closest = 0.0f;
+            std::string closest_name = "none";
+            for (const auto& profile : profiles_) {
+                const float score = cosine_sim(embedding, profile.embedding);
+                if (score > closest) { closest = score; closest_name = profile.name; }
+            }
+            RCLCPP_INFO(get_logger(), "[MATCH] Guest (closest: %s=%.4f, threshold=%.2f)",
+                        closest_name.c_str(), closest, match_threshold_);
         }
 
         return best_name;

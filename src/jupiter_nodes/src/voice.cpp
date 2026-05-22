@@ -467,7 +467,13 @@ private:
 
     void response_callback(const std_msgs::msg::String::SharedPtr msg) {
         const std::string text = msg->data;
-        if (text.empty() || text.size() < 2) return;
+        if (text.empty() || text.size() < 2) {
+            // Empty ack (e.g. brain is sleeping) — clear the speaking flag immediately
+            // so the listening loop isn't blocked for the full response_timeout_s.
+            speak_deadline_ = std::chrono::steady_clock::time_point::max();
+            is_speaking_ = false;
+            return;
+        }
 
         RCLCPP_INFO(get_logger(), "[JUPITER] %s", text.c_str());
 
