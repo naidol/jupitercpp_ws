@@ -39,12 +39,16 @@ def generate_launch_description():
         ],
     )
 
-    # cuVSLAM — RGBD + IMU mode using the Orbbec Gemini 336.
-    # tracking_mode 2 = RGBD (depth + colour image pair, optional IMU fusion).
-    # enable_localization_n_mapping — full visual SLAM:
-    #   publishes map→odom TF (replaces AMCL) AND odom→base_footprint TF (replaces EKF).
-    # depth_scale_factor 1000 — Orbbec depth is in millimetres; cuVSLAM wants metres.
-    # rectified_images false — Orbbec publishes raw (unrectified) colour images.
+    # cuVSLAM — nav mode: re-localises against the saved visual map built during SLAM.
+    # Publishes map→odom TF (global localisation) and odom→base_footprint TF (odometry).
+    # Because the visual map and slam_toolbox occupancy grid were built simultaneously
+    # from the same starting position, cuVSLAM's map frame is aligned with the occupancy
+    # grid — no separate AMCL or initial-pose step needed.
+    #
+    # After launch, load the visual map once:
+    #   ros2 service call /visual_slam/load_landmark_map \
+    #     isaac_ros_visual_slam_interfaces/srv/LoadMap \
+    #     "{map_url: '/home/jupiter/jupitercpp_ws/maps/visual_map'}"
     visual_slam_node = ComposableNode(
         name='visual_slam_node',
         package='isaac_ros_visual_slam',
@@ -54,7 +58,7 @@ def generate_launch_description():
             'depth_scale_factor':                1000.0,
             'enable_image_denoising':            False,
             'rectified_images':                  False,
-            'image_jitter_threshold_ms':         100.0,
+            'image_jitter_threshold_ms':         500.0,
             'sync_matching_threshold_ms':        40.0,
             'base_frame':                        'base_footprint',
             'map_frame':                         'map',

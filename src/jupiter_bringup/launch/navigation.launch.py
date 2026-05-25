@@ -1,11 +1,15 @@
 # Copyright 2026 Logan Naidoo <naidoo.logan@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 #
-# Autonomous navigation launch — requires a saved map.
+# Autonomous navigation — vision-only stack (no LiDAR).
 #
-# Localisation: Isaac ROS cuVSLAM (Orbbec RGBD + IMU) replaces AMCL + EKF.
-#   cuVSLAM publishes the full map → odom → base_footprint TF chain.
-#   The camera must be started with depth + IMU enabled (nav mode in bringup).
+# Localisation:  Isaac ROS cuVSLAM  — publishes map→odom→base_footprint TF
+# Obstacle map:  Isaac ROS nvblox   — depth → GPU TSDF → 2D ESDF costmap slice
+# Navigation:    Nav2 MPPI          — NvbloxCostmapLayer replaces LaserScan costmaps
+#
+# No pre-built map required. nvblox builds the 3D map incrementally as the robot
+# moves; the Nav2 global planner plans through unknown space (allow_unknown: true)
+# until the map fills in.
 #
 # Usage:
 #   ros2 launch jupiter_bringup jupiter_bringup.launch.py \
@@ -14,42 +18,31 @@
 #     enable_microros:=true enable_nav:=true mode:=nav   (full: nav + AI)
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 
+
 def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
     nav2_config = os.path.join(bringup_dir, 'config', 'nav2_params.yaml')
-    default_map = os.path.join(os.path.expanduser('~'), 'jupitercpp_ws', 'maps', 'map.yaml')
-
-    map_file = LaunchConfiguration('map')
 
     return LaunchDescription([
-        DeclareLaunchArgument(
-            'map',
-            default_value=default_map,
-            description='Full path to map yaml file',
-        ),
 
-        # Isaac ROS cuVSLAM — replaces AMCL + EKF.
-        # Publishes map→odom TF (global localisation) and odom→base_footprint TF
-        # (visual odometry). Place the robot at the map origin before starting.
+        # cuVSLAM — visual odometry + localization (map→odom→base_footprint TF)
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(bringup_dir, 'launch', 'visual_slam.launch.py')
             )
         ),
 
-        Node(
-            package='nav2_map_server',
-            executable='map_server',
-            name='map_server',
-            output='screen',
-            parameters=[nav2_config, {'yaml_filename': map_file}],
+        # nvblox — GPU 3D reconstruction → 2D ESDF slice for Nav2 costmap layer
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(bringup_dir, 'launch', 'nvblox.launch.py')
+            )
         ),
 
         Node(
@@ -108,7 +101,7 @@ def generate_launch_description():
             output='screen',
             parameters=[nav2_config],
             remappings=[
-                ('cmd_vel',         'cmd_vel_nav'),
+                ('cmd_vel',          'cmd_vel_nav'),
                 ('cmd_vel_smoothed', 'cmd_vel'),
             ],
         ),
@@ -122,7 +115,6 @@ def generate_launch_description():
                 'use_sim_time': False,
                 'autostart': True,
                 'node_names': [
-                    'map_server',
                     'controller_server',
                     'smoother_server',
                     'planner_server',

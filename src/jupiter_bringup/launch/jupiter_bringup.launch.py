@@ -3,15 +3,18 @@
 #
 # Master bringup for Jupiter robot.
 #
+# Vision-only nav stack: cuVSLAM (localisation) + nvblox (3D map → 2D ESDF costmap).
+# No LiDAR — depth camera replaces it entirely.
+#
 # Usage:
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py                                                                                    # AI-only (voice/vision/brain/camera, no LiDAR/Nav, no micro-ROS)
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true                                                              # AI-only + ESP32 (IMU, odometry, cmd_vel)
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_nav:=true enable_voice:=false                         # SLAM mapping (no voice — Whisper GPU causes USB DMA stalls that drop LiDAR frames)
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_nav:=true mode:=nav enable_voice:=false               # Nav2 navigation only (no AI nodes)
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_nav:=true mode:=nav                                   # Full robot: Nav2 + AI (voice/vision/brain)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py                                                                 # AI-only (voice/vision/brain/camera, no Nav, no micro-ROS)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true                                           # AI-only + ESP32 (IMU, odometry, cmd_vel)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_nav:=true enable_voice:=false      # SLAM mapping (builds cuVSLAM visual map; voice off — Whisper GPU DMA stalls)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_nav:=true mode:=nav enable_voice:=false   # Nav2 navigation only (no AI)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_nav:=true mode:=nav               # Full robot: Nav2 + AI (voice/vision/brain)
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
@@ -23,7 +26,6 @@ def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
 
     mode            = LaunchConfiguration('mode')
-    map_file        = LaunchConfiguration('map')
     enable_nav      = LaunchConfiguration('enable_nav')
     enable_microros = LaunchConfiguration('enable_microros')
     enable_voice    = LaunchConfiguration('enable_voice')
@@ -38,22 +40,17 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_nav',
             default_value='false',
-            description='Set true to enable LiDAR/EKF/Nav stack (SLAM mapping or Nav2 navigation, selected by mode arg).',
+            description='Set true to enable vision-only nav stack (cuVSLAM + nvblox + Nav2). Mode selected by mode arg.',
         ),
         DeclareLaunchArgument(
             'mode',
             default_value='slam',
-            description='Operating mode: slam (build a map) or nav (navigate with saved map)',
-        ),
-        DeclareLaunchArgument(
-            'map',
-            default_value=os.path.join(os.path.expanduser('~'), 'jupitercpp_ws', 'maps', 'map.yaml'),
-            description='Full path to map yaml file (nav mode only)',
+            description='Operating mode: slam (build cuVSLAM visual map) or nav (navigate with nvblox dynamic costmap)',
         ),
         DeclareLaunchArgument(
             'enable_voice',
             default_value='true',
-            description='Set false to disable voice/brain nodes (required for SLAM mapping — Whisper GPU causes tegra-xusb DMA stalls that drop LiDAR frames).',
+            description='Set false to disable voice/brain nodes (recommended during SLAM mapping — Whisper GPU DMA stalls affect timing).',
         ),
 
         # ── Hardware layer ────────────────────────────────────────────────────
@@ -87,44 +84,15 @@ def generate_launch_description():
             ),
         ]),
 
-        # Nav mode — autonomous navigation with a saved map (includes localization)
+        # Nav mode — autonomous navigation with nvblox dynamic costmap (no pre-built map needed)
         TimerAction(period=3.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     os.path.join(bringup_dir, 'launch', 'navigation.launch.py')
                 ),
-                launch_arguments={'map': map_file}.items(),
                 condition=IfCondition(PythonExpression([
                     "'", enable_nav, "' == 'true' and '", mode, "' == 'nav'"
                 ])),
-            ),
-        ]),
-
-        # LD19 LiDAR — only needed for SLAM/Nav.
-        # Delayed 28s: camera starts at 4s but takes up to 25s device-selection in
-        # SLAM mode (depth disabled = ~38s total). Starting LiDAR before camera
-        # settles causes serial FIFO starvation — SDK loses frame sync after first scan.
-        #
-        # Static TF (base_footprint → base_laser) — runs permanently, no restart needed.
-        TimerAction(period=28.0, actions=[
-            Node(
-                package='tf2_ros',
-                executable='static_transform_publisher',
-                name='base_link_to_base_laser_ld19',
-                arguments=['0.06', '0', '0.22', '0', '0', '0', 'base_footprint', 'base_laser'],
-                condition=IfCondition(enable_nav),
-            ),
-        ]),
-        # LiDAR watchdog — starts ldlidar_stl_ros2_node and auto-restarts it when
-        # /scan times out. Whisper GPU inference causes tegra-xusb DMA stalls that
-        # drop cp210x serial bytes, breaking LD19 SDK frame sync (no self-recovery).
-        # Delayed 30s: 2s after TF publisher to let it settle before first scan arrives.
-        TimerAction(period=30.0, actions=[
-            ExecuteProcess(
-                cmd=[os.path.join(bringup_dir, 'scripts', 'lidar_watchdog.sh')],
-                output='screen',
-                name='lidar_watchdog',
-                condition=IfCondition(enable_nav),
             ),
         ]),
 
@@ -162,41 +130,10 @@ def generate_launch_description():
             ),
         ]),
 
-        # Orbbec Gemini 336 — SLAM mode: color-only.
-        # Depth disabled: slam_toolbox only needs /scan (LiDAR), not depth frames.
-        # Color MJPG at 15fps is low USB bandwidth and does not interfere with LiDAR serial.
-        TimerAction(period=4.0, actions=[
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    os.path.join(
-                        get_package_share_directory('orbbec_camera'),
-                        'launch', 'gemini_330_series.launch.py'
-                    )
-                ),
-                launch_arguments={
-                    'serial_number':              'CP9KB53000HP',
-                    'usb_port':                   '2-1',
-                    'color_width':                '640',
-                    'color_height':               '480',
-                    'color_fps':                  '15',
-                    'color_format':               'MJPG',
-                    'enable_depth':               'false',
-                    'enable_ir':                  'false',
-                    'enable_point_cloud':         'false',
-                    'enable_colored_point_cloud': 'false',
-                }.items(),
-                condition=IfCondition(PythonExpression([
-                    "'", enable_nav, "' == 'true' and '", mode, "' == 'slam'"
-                ])),
-            ),
-        ]),
-
-        # Orbbec Gemini 336 — Nav mode: colour + depth + IMU for cuVSLAM.
-        # enable_sync_output_accel_gyro publishes combined IMU on /camera/gyro_accel/sample
-        #   with frame_id camera_accel_gyro_optical_frame.
-        # align_mode=SW aligns depth to the colour frame → published on /camera/depth/image_raw.
-        # depth 640×480 @ 30 fps is well within USB-C super-speed bandwidth.
-        # Face recognition continues to use /camera/color/image_raw — no conflict.
+        # Orbbec Gemini 336 — SLAM mode: colour + depth + IMU @ 15fps for cuVSLAM.
+        # 15fps keeps USB DMA budget well within limits with micro-ROS on the same bus.
+        # cuVSLAM builds the visual keyframe map; save it after mapping with:
+        #   ros2 service call /visual_slam/save_landmark_map ...
         TimerAction(period=4.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -210,12 +147,53 @@ def generate_launch_description():
                     'usb_port':                        '2-1',
                     'color_width':                     '640',
                     'color_height':                    '480',
-                    'color_fps':                       '30',
+                    'color_fps':                       '15',
                     'color_format':                    'MJPG',
                     'enable_depth':                    'true',
                     'depth_width':                     '640',
                     'depth_height':                    '480',
-                    'depth_fps':                       '30',
+                    'depth_fps':                       '15',
+                    'enable_ir':                       'false',
+                    'enable_point_cloud':              'false',
+                    'enable_colored_point_cloud':      'false',
+                    'align_mode':                      'SW',
+                    'align_target_stream':             'COLOR',
+                    'enable_accel':                    'true',
+                    'enable_gyro':                     'true',
+                    'enable_sync_output_accel_gyro':   'true',
+                    'accel_rate':                      '200hz',
+                    'gyro_rate':                       '200hz',
+                }.items(),
+                condition=IfCondition(PythonExpression([
+                    "'", enable_nav, "' == 'true' and '", mode, "' == 'slam'"
+                ])),
+            ),
+        ]),
+
+        # Orbbec Gemini 336 — Nav mode: colour + depth + IMU @ 15fps for cuVSLAM + nvblox.
+        # cuVSLAM: localisation (map→odom→base_footprint TF); load visual map after launch.
+        # nvblox: consumes depth + colour to build 3D TSDF → 2D ESDF costmap for Nav2.
+        # align_mode=SW aligns depth to colour frame → /camera/depth/image_raw.
+        # IMU on /camera/gyro_accel/sample (frame: camera_accel_gyro_optical_frame).
+        TimerAction(period=4.0, actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        get_package_share_directory('orbbec_camera'),
+                        'launch', 'gemini_330_series.launch.py'
+                    )
+                ),
+                launch_arguments={
+                    'serial_number':                   'CP9KB53000HP',
+                    'usb_port':                        '2-1',
+                    'color_width':                     '640',
+                    'color_height':                    '480',
+                    'color_fps':                       '15',
+                    'color_format':                    'MJPG',
+                    'enable_depth':                    'true',
+                    'depth_width':                     '640',
+                    'depth_height':                    '480',
+                    'depth_fps':                       '15',
                     'enable_ir':                       'false',
                     'enable_point_cloud':              'false',
                     'enable_colored_point_cloud':      'false',
@@ -274,8 +252,7 @@ def generate_launch_description():
 
         # Whisper ASR + Piper TTS
         # Disabled during SLAM mapping (enable_voice:=false): Whisper GPU inference
-        # causes tegra-xusb DMA stalls every 4s that starve the LiDAR serial FIFO
-        # and block the slam_toolbox executor, preventing scans from being processed.
+        # causes tegra-xusb DMA stalls that can affect cuVSLAM image timing.
         TimerAction(period=5.0, actions=[
             Node(
                 package='jupiter_nodes',
