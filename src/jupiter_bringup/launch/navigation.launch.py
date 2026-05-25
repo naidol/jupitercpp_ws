@@ -2,9 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Autonomous navigation launch — requires a saved map.
+#
+# Localisation: Isaac ROS cuVSLAM (Orbbec RGBD + IMU) replaces AMCL + EKF.
+#   cuVSLAM publishes the full map → odom → base_footprint TF chain.
+#   The camera must be started with depth + IMU enabled (nav mode in bringup).
+#
 # Usage:
-#   ros2 launch jupiter_bringup navigation.launch.py
-#   ros2 launch jupiter_bringup navigation.launch.py map:=/path/to/your/map.yaml
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py \
+#     enable_microros:=true enable_nav:=true mode:=nav enable_voice:=false
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py \
+#     enable_microros:=true enable_nav:=true mode:=nav   (full: nav + AI)
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -28,9 +35,12 @@ def generate_launch_description():
             description='Full path to map yaml file',
         ),
 
+        # Isaac ROS cuVSLAM — replaces AMCL + EKF.
+        # Publishes map→odom TF (global localisation) and odom→base_footprint TF
+        # (visual odometry). Place the robot at the map origin before starting.
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
-                os.path.join(bringup_dir, 'launch', 'localization.launch.py')
+                os.path.join(bringup_dir, 'launch', 'visual_slam.launch.py')
             )
         ),
 
@@ -40,14 +50,6 @@ def generate_launch_description():
             name='map_server',
             output='screen',
             parameters=[nav2_config, {'yaml_filename': map_file}],
-        ),
-
-        Node(
-            package='nav2_amcl',
-            executable='amcl',
-            name='amcl',
-            output='screen',
-            parameters=[nav2_config],
         ),
 
         Node(
@@ -106,7 +108,7 @@ def generate_launch_description():
             output='screen',
             parameters=[nav2_config],
             remappings=[
-                ('cmd_vel', 'cmd_vel_nav'),
+                ('cmd_vel',         'cmd_vel_nav'),
                 ('cmd_vel_smoothed', 'cmd_vel'),
             ],
         ),
@@ -121,7 +123,6 @@ def generate_launch_description():
                 'autostart': True,
                 'node_names': [
                     'map_server',
-                    'amcl',
                     'controller_server',
                     'smoother_server',
                     'planner_server',

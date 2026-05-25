@@ -4,10 +4,11 @@
 # Master bringup for Jupiter robot.
 #
 # Usage:
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py                                                                                    # AI-only (voice/vision/brain/camera, no SLAM/LiDAR, no micro-ROS)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py                                                                                    # AI-only (voice/vision/brain/camera, no LiDAR/Nav, no micro-ROS)
 #   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true                                                              # AI-only + ESP32 (IMU, odometry, cmd_vel)
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_slam:=true enable_voice:=false                        # SLAM mapping (no voice — Whisper GPU causes USB DMA stalls that drop LiDAR frames)
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_slam:=true mode:=nav                                  # Autonomous navigation with AI
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_nav:=true enable_voice:=false                         # SLAM mapping (no voice — Whisper GPU causes USB DMA stalls that drop LiDAR frames)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_nav:=true mode:=nav enable_voice:=false               # Nav2 navigation only (no AI nodes)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_nav:=true mode:=nav                                   # Full robot: Nav2 + AI (voice/vision/brain)
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, TimerAction
@@ -23,7 +24,7 @@ def generate_launch_description():
 
     mode            = LaunchConfiguration('mode')
     map_file        = LaunchConfiguration('map')
-    enable_slam     = LaunchConfiguration('enable_slam')
+    enable_nav      = LaunchConfiguration('enable_nav')
     enable_microros = LaunchConfiguration('enable_microros')
     enable_voice    = LaunchConfiguration('enable_voice')
 
@@ -35,9 +36,9 @@ def generate_launch_description():
             description='Set true to start micro-ROS agent (requires ESP32 on /dev/jupiter_esp32).',
         ),
         DeclareLaunchArgument(
-            'enable_slam',
+            'enable_nav',
             default_value='false',
-            description='Set true to enable SLAM/Nav2/EKF/LiDAR stack. Default false for AI-only operation.',
+            description='Set true to enable LiDAR/EKF/Nav stack (SLAM mapping or Nav2 navigation, selected by mode arg).',
         ),
         DeclareLaunchArgument(
             'mode',
@@ -72,7 +73,7 @@ def generate_launch_description():
             ),
         ]),
 
-        # ── Navigation layer — only when enable_slam:=true ────────────────────
+        # ── Navigation layer — only when enable_nav:=true ────────────────────
 
         # SLAM mode — builds a new map (includes localization + EKF)
         TimerAction(period=3.0, actions=[
@@ -81,7 +82,7 @@ def generate_launch_description():
                     os.path.join(bringup_dir, 'launch', 'slam.launch.py')
                 ),
                 condition=IfCondition(PythonExpression([
-                    "'", enable_slam, "' == 'true' and '", mode, "' == 'slam'"
+                    "'", enable_nav, "' == 'true' and '", mode, "' == 'slam'"
                 ])),
             ),
         ]),
@@ -94,7 +95,7 @@ def generate_launch_description():
                 ),
                 launch_arguments={'map': map_file}.items(),
                 condition=IfCondition(PythonExpression([
-                    "'", enable_slam, "' == 'true' and '", mode, "' == 'nav'"
+                    "'", enable_nav, "' == 'true' and '", mode, "' == 'nav'"
                 ])),
             ),
         ]),
@@ -111,7 +112,7 @@ def generate_launch_description():
                 executable='static_transform_publisher',
                 name='base_link_to_base_laser_ld19',
                 arguments=['0.06', '0', '0.22', '0', '0', '0', 'base_footprint', 'base_laser'],
-                condition=IfCondition(enable_slam),
+                condition=IfCondition(enable_nav),
             ),
         ]),
         # LiDAR watchdog — starts ldlidar_stl_ros2_node and auto-restarts it when
@@ -123,7 +124,7 @@ def generate_launch_description():
                 cmd=[os.path.join(bringup_dir, 'scripts', 'lidar_watchdog.sh')],
                 output='screen',
                 name='lidar_watchdog',
-                condition=IfCondition(enable_slam),
+                condition=IfCondition(enable_nav),
             ),
         ]),
 
@@ -156,18 +157,14 @@ def generate_launch_description():
                     'enable_colored_point_cloud': 'false',
                 }.items(),
                 condition=IfCondition(PythonExpression([
-                    "'", enable_slam, "' == 'false' and '", enable_voice, "' == 'true'"
+                    "'", enable_nav, "' == 'false' and '", enable_voice, "' == 'true'"
                 ])),
             ),
         ]),
 
-        # Orbbec Gemini 336 — SLAM mode: color-only, always started when SLAM is enabled.
-        # Camera is decoupled from enable_voice: Whisper GPU inference causes DMA stalls
-        # (not the camera stream itself). Color-only MJPG at 15fps is low USB bandwidth
-        # and does not interfere with LiDAR serial. Useful for remote RViz camera feed
-        # during manual mapping to avoid obstacles without relying on laser scan alone.
+        # Orbbec Gemini 336 — SLAM mode: color-only.
         # Depth disabled: slam_toolbox only needs /scan (LiDAR), not depth frames.
-        # Re-enable depth here only when Nav2 navigation with costmaps is needed.
+        # Color MJPG at 15fps is low USB bandwidth and does not interfere with LiDAR serial.
         TimerAction(period=4.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -188,7 +185,50 @@ def generate_launch_description():
                     'enable_point_cloud':         'false',
                     'enable_colored_point_cloud': 'false',
                 }.items(),
-                condition=IfCondition(enable_slam),
+                condition=IfCondition(PythonExpression([
+                    "'", enable_nav, "' == 'true' and '", mode, "' == 'slam'"
+                ])),
+            ),
+        ]),
+
+        # Orbbec Gemini 336 — Nav mode: colour + depth + IMU for cuVSLAM.
+        # enable_sync_output_accel_gyro publishes a combined sensor_msgs/Imu on /camera/imu.
+        # align_mode=SW aligns depth to the colour frame → /camera/depth_to_color/image_raw.
+        # depth 640×480 @ 30 fps is well within USB-C super-speed bandwidth.
+        # Face recognition continues to use /camera/color/image_raw — no conflict.
+        TimerAction(period=4.0, actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        get_package_share_directory('orbbec_camera'),
+                        'launch', 'gemini_330_series.launch.py'
+                    )
+                ),
+                launch_arguments={
+                    'serial_number':                   'CP9KB53000HP',
+                    'usb_port':                        '2-1',
+                    'color_width':                     '640',
+                    'color_height':                    '480',
+                    'color_fps':                       '30',
+                    'color_format':                    'MJPG',
+                    'enable_depth':                    'true',
+                    'depth_width':                     '640',
+                    'depth_height':                    '480',
+                    'depth_fps':                       '30',
+                    'enable_ir':                       'false',
+                    'enable_point_cloud':              'false',
+                    'enable_colored_point_cloud':      'false',
+                    'align_mode':                      'SW',
+                    'align_target_stream':             'COLOR',
+                    'enable_accel':                    'true',
+                    'enable_gyro':                     'true',
+                    'enable_sync_output_accel_gyro':   'true',
+                    'accel_rate':                      '200hz',
+                    'gyro_rate':                       '200hz',
+                }.items(),
+                condition=IfCondition(PythonExpression([
+                    "'", enable_nav, "' == 'true' and '", mode, "' == 'nav'"
+                ])),
             ),
         ]),
 
