@@ -4,10 +4,10 @@
 # Master bringup for Jupiter robot.
 #
 # Usage:
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py                                              # AI-only (voice/vision/brain/camera, no SLAM/LiDAR, no micro-ROS)
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true                        # AI-only + ESP32 (IMU, odometry, cmd_vel)
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_slam:=true      # SLAM mapping mode
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_slam:=true mode:=nav  # Autonomous navigation
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py                                                                                    # AI-only (voice/vision/brain/camera, no SLAM/LiDAR, no micro-ROS)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true                                                              # AI-only + ESP32 (IMU, odometry, cmd_vel)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_slam:=true enable_voice:=false                        # SLAM mapping (no voice — Whisper GPU causes USB DMA stalls that drop LiDAR frames)
+#   ros2 launch jupiter_bringup jupiter_bringup.launch.py enable_microros:=true enable_slam:=true mode:=nav                                  # Autonomous navigation with AI
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, TimerAction
@@ -21,10 +21,11 @@ import os
 def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
 
-    mode           = LaunchConfiguration('mode')
-    map_file       = LaunchConfiguration('map')
-    enable_slam    = LaunchConfiguration('enable_slam')
+    mode            = LaunchConfiguration('mode')
+    map_file        = LaunchConfiguration('map')
+    enable_slam     = LaunchConfiguration('enable_slam')
     enable_microros = LaunchConfiguration('enable_microros')
+    enable_voice    = LaunchConfiguration('enable_voice')
 
     return LaunchDescription([
 
@@ -48,13 +49,20 @@ def generate_launch_description():
             default_value=os.path.join(os.path.expanduser('~'), 'maps', 'map.yaml'),
             description='Full path to map yaml file (nav mode only)',
         ),
+        DeclareLaunchArgument(
+            'enable_voice',
+            default_value='true',
+            description='Set false to disable voice/brain nodes (required for SLAM mapping — Whisper GPU causes tegra-xusb DMA stalls that drop LiDAR frames).',
+        ),
 
         # ── Hardware layer ────────────────────────────────────────────────────
 
-        # micro-ROS agent — delayed 15s to let camera and voice/brain nodes start.
-        # Camera now initialises in ~3s (ReSpeaker isolated on separate hub branch).
-        # 15s gives safe headroom for camera (~7s ready) and AI nodes (~10s settled).
-        TimerAction(period=15.0, actions=[
+        # micro-ROS agent — started at 2s, BEFORE the camera (4s).
+        # Orbbec cold-boot init takes ~55s and saturates the tegra-xusb DMA engine,
+        # starving the ESP32 cp210x serial and causing micro-ROS to thrash if it tries
+        # to connect during that window. Starting at 2s lets the connection fully
+        # establish before the camera DMA storm begins.
+        TimerAction(period=2.0, actions=[
             ExecuteProcess(
                 cmd=['ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
                      'serial', '--dev', '/dev/jupiter_esp32', '-b', '115200'],
@@ -102,7 +110,7 @@ def generate_launch_description():
                 package='tf2_ros',
                 executable='static_transform_publisher',
                 name='base_link_to_base_laser_ld19',
-                arguments=['0.06', '0', '0.13', '0', '0', '0', 'base_footprint', 'base_laser'],
+                arguments=['0.06', '0', '0.22', '0', '0', '0', 'base_footprint', 'base_laser'],
                 condition=IfCondition(enable_slam),
             ),
         ]),
@@ -125,6 +133,8 @@ def generate_launch_description():
         # Depth disabled: tegra-xusb shares one DMA engine across all USB ports.
         # Depth streaming saturates it during Whisper GPU inference, causing MJPG
         # frame decode failures. Color-only keeps USB bandwidth well within budget.
+        # Not started when enable_voice:=false (SLAM mapping mode) — camera feeds
+        # face recognition which is also disabled; no point starting either.
         TimerAction(period=4.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -134,6 +144,8 @@ def generate_launch_description():
                     )
                 ),
                 launch_arguments={
+                    'serial_number':              'CP9KB53000HP',
+                    'usb_port':                   '2-1',
                     'color_width':                '640',
                     'color_height':               '480',
                     'color_fps':                  '15',
@@ -143,14 +155,17 @@ def generate_launch_description():
                     'enable_point_cloud':         'false',
                     'enable_colored_point_cloud': 'false',
                 }.items(),
-                condition=IfCondition(PythonExpression(["'", enable_slam, "' == 'false'"])),
+                condition=IfCondition(PythonExpression([
+                    "'", enable_slam, "' == 'false' and '", enable_voice, "' == 'true'"
+                ])),
             ),
         ]),
 
-        # Orbbec Gemini 336 — SLAM mode: color-only, same as AI-only mode.
+        # Orbbec Gemini 336 — SLAM mode with AI: color-only, same as AI-only mode.
+        # Not started when enable_voice:=false (mapping mode) — face recognition is
+        # disabled so there's no consumer; eliminating USB DMA frees up bandwidth
+        # for the LiDAR serial path during scan processing.
         # Depth disabled: slam_toolbox only needs /scan (LiDAR), not depth frames.
-        # Enabling depth in SLAM mode causes OrbbecSDK to take 90s to initialise
-        # (vs 2.5s color-only), which starves the LiDAR serial FIFO during startup.
         # Re-enable depth here only when Nav2 navigation with costmaps is needed.
         TimerAction(period=4.0, actions=[
             IncludeLaunchDescription(
@@ -161,6 +176,8 @@ def generate_launch_description():
                     )
                 ),
                 launch_arguments={
+                    'serial_number':              'CP9KB53000HP',
+                    'usb_port':                   '2-1',
                     'color_width':                '640',
                     'color_height':               '480',
                     'color_fps':                  '15',
@@ -170,7 +187,9 @@ def generate_launch_description():
                     'enable_point_cloud':         'false',
                     'enable_colored_point_cloud': 'false',
                 }.items(),
-                condition=IfCondition(enable_slam),
+                condition=IfCondition(PythonExpression([
+                    "'", enable_slam, "' == 'true' and '", enable_voice, "' == 'true'"
+                ])),
             ),
         ]),
 
@@ -184,6 +203,7 @@ def generate_launch_description():
                 parameters=[{
                     'match_threshold': 0.55,  # SFace paper threshold — 0.40 caused false matches
                 }],
+                condition=IfCondition(enable_voice),
             ),
         ]),
 
@@ -194,6 +214,7 @@ def generate_launch_description():
                 executable='jupiter_vision',
                 name='jupiter_vision',
                 output='screen',
+                condition=IfCondition(enable_voice),
             ),
         ]),
 
@@ -205,13 +226,16 @@ def generate_launch_description():
                 executable='jupiter_display',
                 name='jupiter_display',
                 output='screen',
-                additional_env={'DISPLAY': ':1'},
+                additional_env={'DISPLAY': ':0', 'XAUTHORITY': '/run/user/2002/gdm/Xauthority'},
             ),
         ]),
 
         # ── Voice + Brain layer ───────────────────────────────────────────────
 
         # Whisper ASR + Piper TTS
+        # Disabled during SLAM mapping (enable_voice:=false): Whisper GPU inference
+        # causes tegra-xusb DMA stalls every 4s that starve the LiDAR serial FIFO
+        # and block the slam_toolbox executor, preventing scans from being processed.
         TimerAction(period=5.0, actions=[
             Node(
                 package='jupiter_nodes',
@@ -223,6 +247,7 @@ def generate_launch_description():
                     'record_seconds':   4,        # 4s window: speech dominates; 8s let startup zeros break VAD
                     'vad_snr_ratio':    1.7,      # peak/trough RMS ratio: HVAC≈1.1, speech≈2-10
                 }],
+                condition=IfCondition(enable_voice),
             ),
         ]),
 
@@ -233,6 +258,7 @@ def generate_launch_description():
                 executable='jupiter_brain',
                 name='jupiter_brain',
                 output='screen',
+                condition=IfCondition(enable_voice),
             ),
         ]),
 
