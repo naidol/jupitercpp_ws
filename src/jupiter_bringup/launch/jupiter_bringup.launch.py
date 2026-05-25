@@ -161,10 +161,11 @@ def generate_launch_description():
             ),
         ]),
 
-        # Orbbec Gemini 336 — SLAM mode with AI: color-only, same as AI-only mode.
-        # Not started when enable_voice:=false (mapping mode) — face recognition is
-        # disabled so there's no consumer; eliminating USB DMA frees up bandwidth
-        # for the LiDAR serial path during scan processing.
+        # Orbbec Gemini 336 — SLAM mode: color-only, always started when SLAM is enabled.
+        # Camera is decoupled from enable_voice: Whisper GPU inference causes DMA stalls
+        # (not the camera stream itself). Color-only MJPG at 15fps is low USB bandwidth
+        # and does not interfere with LiDAR serial. Useful for remote RViz camera feed
+        # during manual mapping to avoid obstacles without relying on laser scan alone.
         # Depth disabled: slam_toolbox only needs /scan (LiDAR), not depth frames.
         # Re-enable depth here only when Nav2 navigation with costmaps is needed.
         TimerAction(period=4.0, actions=[
@@ -187,9 +188,7 @@ def generate_launch_description():
                     'enable_point_cloud':         'false',
                     'enable_colored_point_cloud': 'false',
                 }.items(),
-                condition=IfCondition(PythonExpression([
-                    "'", enable_slam, "' == 'true' and '", enable_voice, "' == 'true'"
-                ])),
+                condition=IfCondition(enable_slam),
             ),
         ]),
 
