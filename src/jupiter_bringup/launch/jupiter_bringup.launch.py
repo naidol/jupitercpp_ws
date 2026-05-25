@@ -47,7 +47,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'map',
-            default_value=os.path.join(os.path.expanduser('~'), 'maps', 'map.yaml'),
+            default_value=os.path.join(os.path.expanduser('~'), 'jupitercpp_ws', 'maps', 'map.yaml'),
             description='Full path to map yaml file (nav mode only)',
         ),
         DeclareLaunchArgument(
@@ -192,8 +192,9 @@ def generate_launch_description():
         ]),
 
         # Orbbec Gemini 336 — Nav mode: colour + depth + IMU for cuVSLAM.
-        # enable_sync_output_accel_gyro publishes a combined sensor_msgs/Imu on /camera/imu.
-        # align_mode=SW aligns depth to the colour frame → /camera/depth_to_color/image_raw.
+        # enable_sync_output_accel_gyro publishes combined IMU on /camera/gyro_accel/sample
+        #   with frame_id camera_accel_gyro_optical_frame.
+        # align_mode=SW aligns depth to the colour frame → published on /camera/depth/image_raw.
         # depth 640×480 @ 30 fps is well within USB-C super-speed bandwidth.
         # Face recognition continues to use /camera/color/image_raw — no conflict.
         TimerAction(period=4.0, actions=[

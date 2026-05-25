@@ -24,7 +24,7 @@ import os
 def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
     nav2_config = os.path.join(bringup_dir, 'config', 'nav2_params.yaml')
-    default_map = os.path.join(os.path.expanduser('~'), 'maps', 'map.yaml')
+    default_map = os.path.join(os.path.expanduser('~'), 'jupitercpp_ws', 'maps', 'map.yaml')
 
     map_file = LaunchConfiguration('map')
 

@@ -403,9 +403,12 @@ int main(int argc, char** argv) {
             }
         }
         if (target) {
+            window->setFlags(Qt::Window | Qt::FramelessWindowHint);
             window->setScreen(target);
             window->setGeometry(target->geometry());
             window->showFullScreen();
+            window->raise();
+            window->requestActivate();
             RCLCPP_INFO(node->get_logger(), "Display on 7-inch panel (%s)",
                         target->name().toStdString().c_str());
         } else {
