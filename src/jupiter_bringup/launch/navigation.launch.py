@@ -4,11 +4,12 @@
 # Autonomous navigation — hybrid stack (cuVSLAM localisation + LD20 LiDAR obstacles).
 #
 # Localisation:  Isaac ROS cuVSLAM  — publishes map→odom→base_footprint TF
+# Static map:    map_server          — pre-built LiDAR occupancy grid (StaticLayer)
 # Obstacle map:  LD20 LiDAR         — /scan → Nav2 ObstacleLayer costmap
-# Navigation:    Nav2 MPPI          — ObstacleLayer replaces NvbloxCostmapLayer
+# Navigation:    Nav2 MPPI          — StaticLayer + ObstacleLayer fused in costmaps
 #
-# No pre-built map required. NavFn plans through unknown space (allow_unknown: true)
-# until the map fills in from laser scan marks.
+# Jupiter must start at the map origin (floor marker) so cuVSLAM map frame aligns
+# with the static occupancy grid coordinate frame.
 #
 # Usage:
 #   ros2 launch jupiter_bringup jupiter_bringup.launch.py \
@@ -26,8 +27,24 @@ def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
     nav2_config = os.path.join(bringup_dir, 'config', 'nav2_params.yaml')
     ekf_config  = os.path.join(bringup_dir, 'config', 'ekf_odom.yaml')
+    map_yaml    = os.path.join(bringup_dir, 'maps', 'c82_map_real.yaml')
 
     return LaunchDescription([
+
+        # Map server — serves the pre-built LiDAR occupancy grid as a latched /map topic.
+        # StaticLayer in both costmaps subscribes to /map for permanent wall geometry.
+        # Jupiter must be placed at the map origin (floor marker) at startup so cuVSLAM's
+        # map frame aligns with the occupancy grid coordinate frame.
+        Node(
+            package='nav2_map_server',
+            executable='map_server',
+            name='map_server',
+            output='screen',
+            parameters=[{
+                'use_sim_time': False,
+                'yaml_filename': map_yaml,
+            }],
+        ),
 
         # LD20 LiDAR — 360° scan on /scan, frame: base_laser
         Node(
@@ -152,6 +169,7 @@ def generate_launch_description():
                 'use_sim_time': False,
                 'autostart': True,
                 'node_names': [
+                    'map_server',
                     'controller_server',
                     'smoother_server',
                     'planner_server',
