@@ -3,8 +3,9 @@
 #
 # Master bringup for Jupiter robot.
 #
-# Vision-only nav stack: cuVSLAM (localisation) + nvblox (3D map → 2D ESDF costmap).
-# No LiDAR — depth camera replaces it entirely.
+# Hybrid nav stack: cuVSLAM (global localisation) + LD20 LiDAR (obstacle costmap).
+# cuVSLAM publishes map→odom TF; EKF owns odom→base_footprint via wheel odometry.
+# LD20 /scan feeds Nav2 ObstacleLayer for local obstacle avoidance.
 #
 # Usage:
 #   ros2 launch jupiter_bringup jupiter_bringup.launch.py                                                                 # AI-only (voice/vision/brain/camera, no Nav, no micro-ROS)
@@ -40,7 +41,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_nav',
             default_value='false',
-            description='Set true to enable vision-only nav stack (cuVSLAM + nvblox + Nav2). Mode selected by mode arg.',
+            description='Set true to enable hybrid nav stack (cuVSLAM + LD20 LiDAR + Nav2). Mode selected by mode arg.',
         ),
         DeclareLaunchArgument(
             'mode',
@@ -152,7 +153,7 @@ def generate_launch_description():
                     'enable_depth':                    'true',
                     'depth_width':                     '640',
                     'depth_height':                    '480',
-                    'depth_fps':                       '15',
+                    'depth_fps':                       '6',
                     'enable_ir':                       'false',
                     'enable_point_cloud':              'false',
                     'enable_colored_point_cloud':      'false',
@@ -170,10 +171,11 @@ def generate_launch_description():
             ),
         ]),
 
-        # Orbbec Gemini 336 — Nav mode: colour + depth + IMU @ 15fps for cuVSLAM + nvblox.
-        # cuVSLAM: localisation (map→odom→base_footprint TF); load visual map after launch.
-        # nvblox: consumes depth + colour to build 3D TSDF → 2D ESDF costmap for Nav2.
-        # align_mode=SW aligns depth to colour frame → /camera/depth/image_raw.
+        # Orbbec Gemini 336 — Nav mode: passive IR stereo + IMU (no depth, projector OFF).
+        # cuVSLAM tracks ambient IR features (corners, doorframes, contrast edges).
+        # The internal laser projector MUST be disabled — its dot pattern moves with the
+        # camera and appears as "moving features" to cuVSLAM, causing tracking drift.
+        # Passive IR in a lit room gives stable, room-fixed features on walls and floors.
         # IMU on /camera/gyro_accel/sample (frame: camera_accel_gyro_optical_frame).
         TimerAction(period=4.0, actions=[
             IncludeLaunchDescription(
@@ -186,19 +188,19 @@ def generate_launch_description():
                 launch_arguments={
                     'serial_number':                   'CP9KB53000HP',
                     'usb_port':                        '2-1',
-                    'color_width':                     '640',
-                    'color_height':                    '480',
-                    'color_fps':                       '15',
-                    'color_format':                    'MJPG',
-                    'enable_depth':                    'true',
-                    'depth_width':                     '640',
-                    'depth_height':                    '480',
-                    'depth_fps':                       '15',
-                    'enable_ir':                       'false',
+                    'enable_color':                    'false',
+                    'enable_depth':                    'false',
+                    'enable_left_ir':                  'true',
+                    'enable_right_ir':                 'true',
+                    'left_ir_width':                   '640',
+                    'left_ir_height':                  '480',
+                    'left_ir_fps':                     '15',
+                    'right_ir_width':                  '640',
+                    'right_ir_height':                 '480',
+                    'right_ir_fps':                    '15',
+                    'enable_laser':                    'false',
                     'enable_point_cloud':              'false',
                     'enable_colored_point_cloud':      'false',
-                    'align_mode':                      'SW',
-                    'align_target_stream':             'COLOR',
                     'enable_accel':                    'true',
                     'enable_gyro':                     'true',
                     'enable_sync_output_accel_gyro':   'true',

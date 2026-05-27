@@ -1,0 +1,77 @@
+# Copyright 2026 Logan Naidoo <naidoo.logan@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+#
+# robot_localization EKF — fuses ESP32 mecanum wheel odometry into odom→base_footprint TF.
+#
+# Architecture:
+#   ESP32 wheel odom (/odom/unfiltered) → EKF → odom→base_footprint TF  (local motion)
+#   cuVSLAM (camera+IMU)               →       map→odom TF             (global correction)
+#
+# cuVSLAM is configured with publish_odom_to_base_tf: false so it only publishes
+# map→odom. This EKF owns odom→base_footprint entirely.
+#
+# The wheel odometry from the ESP32 handles mecanum lateral motion (vy) correctly —
+# monocular VIO cannot track lateral strafing reliably. By giving the EKF ownership
+# of local motion, cuVSLAM only needs to handle global drift correction.
+
+ekf_node:
+  ros__parameters:
+
+    frequency: 50.0
+    two_d_mode: true
+
+    publish_tf: true
+    map_frame:       map
+    odom_frame:      odom
+    base_link_frame: base_footprint
+    world_frame:     odom
+
+    # ESP32 wheel odometry — frame_id: odom, child_frame_id: base_footprint
+    odom0: /odom/unfiltered
+    # State: [x,     y,     z,
+    #         roll,  pitch, yaw,
+    #         vx,    vy,    vz,
+    #         vroll, vpitch,vyaw,
+    #         ax,    ay,    az]
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    
+    # Corrected Orbbec Gemini 336 Internal IMU
+    imu0: /imu/data/corrected
+    imu0_config: [false, false, false,
+                  false, false, false, # Ignore Orientation (6-axis only)
+                  false, false, false,
+                  false, false, true,
+                  false, false, false] # DO NOT fuse linear acceleration
+    imu0_differential: false
+    imu0_relative:     true
+    imu0_remove_gravitational_acceleration: true
+
+    odom0_differential: false
+    odom0_relative:     true
+    odom0_queue_size:   10
+
+    # Reject measurements > 5 std deviations from predicted — handles ESP32 startup spikes
+    odom0_pose_rejection_threshold:  5.0
+    odom0_twist_rejection_threshold: 5.0
+
+    # Process noise — tuned for 0.3 m/s mecanum drive on hard floor
+    # All values must be floats (ROS2 param parser requires uniform sequence types)
+    process_noise_covariance: [0.05,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.05,  0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.06,  0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.03,  0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.03,  0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.06,  0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.025,  0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.025,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.04,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.01,  0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.01,  0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.02,  0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.01,  0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.015]

@@ -13,6 +13,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <sensor_msgs/msg/battery_state.hpp>
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -38,21 +39,19 @@ size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, std::string* data) {
 }
 
 std::string strip_non_ascii(const std::string& text) {
-    std::string out;
-    out.reserve(text.size());
-    for (unsigned char c : text) {
-        if (c >= 0x20 && c <= 0x7E) out.push_back(static_cast<char>(c));
-    }
     std::string result;
-    result.reserve(out.size());
+    result.reserve(text.size());
+    
     bool prev_space = false;
-    for (char c : out) {
-        if (c == ' ') {
-            if (!prev_space) result.push_back(c);
-            prev_space = true;
-        } else {
-            result.push_back(c);
-            prev_space = false;
+    for (unsigned char c : text) {
+        if (c >= 0x20 && c <= 0x7E) {
+            if (c == ' ') {
+                if (!prev_space) result.push_back(c);
+                prev_space = true;
+            } else {
+                result.push_back(static_cast<char>(c));
+                prev_space = false;
+            }
         }
     }
     return result;
@@ -223,6 +222,10 @@ public:
             "/current_user", 10,
             std::bind(&JupiterBrain::user_callback, this, std::placeholders::_1));
 
+        battery_sub_ = create_subscription<sensor_msgs::msg::BatteryState>(
+            "/battery/state", 10,
+            std::bind(&JupiterBrain::battery_callback, this, std::placeholders::_1));
+
         RCLCPP_INFO(get_logger(), "Jupiter Brain online — text: %s | vision: %s",
             llama_url_.c_str(), vision_model_.c_str());
         RCLCPP_INFO(get_logger(), "Memory dir: %s", memory_dir_.c_str());
@@ -272,6 +275,11 @@ private:
     }
 
     // ── User tracking ─────────────────────────────────────────────────────────
+
+    void battery_callback(const sensor_msgs::msg::BatteryState::SharedPtr msg) {
+        battery_percentage_ = msg->percentage * 100.0f;
+        battery_voltage_    = msg->voltage;
+    }
 
     void user_callback(const std_msgs::msg::String::SharedPtr msg) {
         const std::string incoming = msg->data;
@@ -449,7 +457,6 @@ private:
             update_history(user_text, reply, visual);
             speak(reply);
         });
-        llm_thread_.detach();
     }
 
     // ── VLM query (llava:7b) ──────────────────────────────────────────────────
@@ -594,6 +601,10 @@ private:
                 " already identified them and suggest they register their face.";
         } else if (for_user == "Guest") {
             contextual_system += " Your camera does not recognise this person — treat them as a guest.";
+        }
+        if (battery_percentage_ > 0.1) {
+            contextual_system += " Your battery is currently at " + 
+                std::to_string(static_cast<int>(battery_percentage_)) + "%.";
         }
         contextual_system += " The current date and time is: " + timestamp + ".";
 
@@ -761,6 +772,8 @@ private:
     std::string current_user_{"Unknown"};
     bool        awaiting_registration_consent_{false};
     std::string pending_registration_name_;
+    float       battery_percentage_{0.0f};
+    float       battery_voltage_{0.0f};
 
     std::atomic<bool> sleeping_{false};
     std::atomic<bool> llm_busy_{false};
@@ -776,6 +789,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr      sleep_pub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr text_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr user_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::BatteryState>::SharedPtr battery_sub_;
 };
 
 

@@ -1,21 +1,18 @@
 # Copyright 2026 Logan Naidoo <naidoo.logan@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 #
-# Autonomous navigation — vision-only stack (no LiDAR).
+# Autonomous navigation — hybrid stack (cuVSLAM localisation + LD20 LiDAR obstacles).
 #
 # Localisation:  Isaac ROS cuVSLAM  — publishes map→odom→base_footprint TF
-# Obstacle map:  Isaac ROS nvblox   — depth → GPU TSDF → 2D ESDF costmap slice
-# Navigation:    Nav2 MPPI          — NvbloxCostmapLayer replaces LaserScan costmaps
+# Obstacle map:  LD20 LiDAR         — /scan → Nav2 ObstacleLayer costmap
+# Navigation:    Nav2 MPPI          — ObstacleLayer replaces NvbloxCostmapLayer
 #
-# No pre-built map required. nvblox builds the 3D map incrementally as the robot
-# moves; the Nav2 global planner plans through unknown space (allow_unknown: true)
-# until the map fills in.
+# No pre-built map required. NavFn plans through unknown space (allow_unknown: true)
+# until the map fills in from laser scan marks.
 #
 # Usage:
 #   ros2 launch jupiter_bringup jupiter_bringup.launch.py \
 #     enable_microros:=true enable_nav:=true mode:=nav enable_voice:=false
-#   ros2 launch jupiter_bringup jupiter_bringup.launch.py \
-#     enable_microros:=true enable_nav:=true mode:=nav   (full: nav + AI)
 
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
@@ -28,20 +25,60 @@ import os
 def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
     nav2_config = os.path.join(bringup_dir, 'config', 'nav2_params.yaml')
+    ekf_config  = os.path.join(bringup_dir, 'config', 'ekf_odom.yaml')
 
     return LaunchDescription([
 
-        # cuVSLAM — visual odometry + localization (map→odom→base_footprint TF)
+        # LD20 LiDAR — 360° scan on /scan, frame: base_laser
+        Node(
+            package='ldlidar_stl_ros2',
+            executable='ldlidar_stl_ros2_node',
+            name='LD19',
+            output='screen',
+            parameters=[
+                {'product_name': 'LDLiDAR_LD19'},
+                {'topic_name': 'scan'},
+                {'frame_id': 'base_laser'},
+                {'port_name': '/dev/jupiter_lidar'},
+                {'port_baudrate': 230400},
+                {'laser_scan_dir': True},
+                {'enable_angle_crop_func': False},
+            ],
+        ),
+
+        # Static TF: base_footprint → base_laser
+        # LD20 physical mounting: 6 cm forward, centred, 13 cm above ground, no rotation.
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='base_link_to_base_laser',
+            arguments=['0.06', '0', '0.13', '0', '0', '0', 'base_footprint', 'base_laser'],
+        ),
+
+        # IMU Covariance Fixer — adds valid variances to the Orbbec IMU data
+        # so the EKF node doesn't ignore the measurements.
+        Node(
+            package='jupiter_nodes',
+            executable='imu_covariance_fixer',
+            name='imu_covariance_fixer',
+            output='screen',
+            remappings=[('/imu/data', '/camera/gyro_accel/sample')],
+        ),
+
+        # EKF — fuses ESP32 wheel odometry into odom→base_footprint TF.
+        # Wheel encoders handle mecanum lateral (vy) motion correctly; VIO cannot.
+        Node(
+            package='robot_localization',
+            executable='ekf_node',
+            name='ekf_node',
+            output='screen',
+            parameters=[ekf_config],
+        ),
+
+        # cuVSLAM — visual odometry + localization (map→odom TF)
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(bringup_dir, 'launch', 'visual_slam.launch.py')
-            )
-        ),
-
-        # nvblox — GPU 3D reconstruction → 2D ESDF slice for Nav2 costmap layer
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(bringup_dir, 'launch', 'nvblox.launch.py')
             )
         ),
 
