@@ -90,20 +90,16 @@ controller_server:
         cost_power: 1
         cost_weight: 12.0
         threshold_to_consider: 1.0
-      # ObstaclesCritic replaces CostCritic — uses separate repulsion and critical
-      # weights rather than a single cost multiplier. collision_cost 10000 (not 1M)
-      # lets MPPI differentiate "near obstacle" from "in collision" trajectories.
-      # inflation_radius/cost_scaling_factor sized for Jupiter's 0.22m inscribed radius.
       ObstaclesCritic:
         enabled: true
         cost_power: 1
-        repulsion_weight: 1.0
-        critical_weight: 10.0
+        repulsion_weight: 3.0
+        critical_weight: 20.0
         consider_footprint: false
         collision_cost: 1000.0
-        collision_margin_distance: 0.10
+        collision_margin_distance: 0.15
         near_goal_distance: 0.5
-        inflation_radius: 0.20
+        inflation_radius: 0.30
         cost_scaling_factor: 3.0
       PathAlignCritic:
         enabled: true
@@ -135,11 +131,7 @@ local_costmap:
       resolution: 0.05
       transform_tolerance: 0.5
       footprint: "[[-0.15, -0.22], [0.15, -0.22], [0.15, 0.22], [-0.15, 0.22]]"
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: true
-        enabled: true
+      plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -158,7 +150,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.20
+        inflation_radius: 0.30
       always_send_full_costmap: true
 
 global_costmap:
@@ -177,11 +169,7 @@ global_costmap:
       origin_x: -20.0
       origin_y: -20.0
       transform_tolerance: 0.5
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: true
-        enabled: true
+      plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -200,7 +188,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.20
+        inflation_radius: 0.30
       always_send_full_costmap: true
 
 planner_server:

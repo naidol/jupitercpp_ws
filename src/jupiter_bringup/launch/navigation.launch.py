@@ -16,7 +16,7 @@
 #     enable_microros:=true enable_nav:=true mode:=nav enable_voice:=false
 
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
@@ -30,21 +30,6 @@ def generate_launch_description():
     map_yaml    = os.path.join(bringup_dir, 'maps', 'c82_map_real.yaml')
 
     return LaunchDescription([
-
-        # Map server — serves the pre-built LiDAR occupancy grid as a latched /map topic.
-        # StaticLayer in both costmaps subscribes to /map for permanent wall geometry.
-        # Jupiter must be placed at the map origin (floor marker) at startup so cuVSLAM's
-        # map frame aligns with the occupancy grid coordinate frame.
-        Node(
-            package='nav2_map_server',
-            executable='map_server',
-            name='map_server',
-            output='screen',
-            parameters=[{
-                'use_sim_time': False,
-                'yaml_filename': map_yaml,
-            }],
-        ),
 
         # LD20 LiDAR — 360° scan on /scan, frame: base_laser
         Node(
@@ -63,8 +48,21 @@ def generate_launch_description():
             ],
         ),
 
+        # Static TF: map → odom (identity)
+        # cuVSLAM map→odom is disabled — its VIO diverges in the passage (poor IR features
+        # near featureless cupboard), producing a tilted/Z-offset transform that lifts the
+        # costmaps off the floor. Identity here keeps map=odom so local odometry drives Nav2
+        # correctly until cuVSLAM can be properly initialised in a feature-rich space.
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='map_to_odom_identity',
+            arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
+        ),
+
         # Static TF: base_footprint → base_laser
-        # LD20 physical mounting: 6 cm forward, centred, 13 cm above ground, no rotation.
+        # LD20 physical mounting: 6 cm forward, centred, 13 cm above ground.
+        # Yaw=pi: LiDAR mounted 180° reversed (cable exits toward front of robot).
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
@@ -160,24 +158,29 @@ def generate_launch_description():
             ],
         ),
 
-        Node(
-            package='nav2_lifecycle_manager',
-            executable='lifecycle_manager',
-            name='lifecycle_manager_navigation',
-            output='screen',
-            parameters=[{
-                'use_sim_time': False,
-                'autostart': True,
-                'node_names': [
-                    'map_server',
-                    'controller_server',
-                    'smoother_server',
-                    'planner_server',
-                    'behavior_server',
-                    'bt_navigator',
-                    'waypoint_follower',
-                    'velocity_smoother',
-                ],
-            }],
-        ),
+        # Lifecycle manager delayed 5s — MPPI CUDA kernel init causes the controller_server
+        # to miss the service response deadline if the lifecycle_manager starts immediately.
+        # 5s gives all Nav2 nodes time to fully initialise their RMW layer first.
+        TimerAction(period=5.0, actions=[
+            Node(
+                package='nav2_lifecycle_manager',
+                executable='lifecycle_manager',
+                name='lifecycle_manager_navigation',
+                output='screen',
+                parameters=[{
+                    'use_sim_time': False,
+                    'autostart': True,
+                    'bond_timeout': 0.0,
+                    'node_names': [
+                        'controller_server',
+                        'smoother_server',
+                        'planner_server',
+                        'behavior_server',
+                        'bt_navigator',
+                        'waypoint_follower',
+                        'velocity_smoother',
+                    ],
+                }],
+            ),
+        ]),
     ])

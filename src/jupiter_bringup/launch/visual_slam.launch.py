@@ -80,12 +80,8 @@ def generate_launch_description():
             'calibration_frequency':             200.0,
             'enable_ground_constraint_in_odometry': True,
             'enable_ground_constraint_in_slam':  True,
-            # EKF (robot_localization) owns odom→base_footprint using wheel odometry.
-            # map→odom is a static identity TF in navigation.launch.py (map frame = odom frame).
-            # Disabling cuVSLAM's map→odom prevents VIO divergence in featureless corridors
-            # from jumping the robot's map position and crashing the global planner.
             'publish_odom_to_base_tf':           False,
-            'publish_map_to_odom_tf':            True,
+            'publish_map_to_odom_tf':            False,
         }],
         remappings=[
             ('visual_slam/image_0',       '/camera/left_ir/image_raw'),
