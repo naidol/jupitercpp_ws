@@ -27,6 +27,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -101,11 +102,11 @@ def generate_launch_description():
                 launch_arguments={
                     'serial_number':                   'CP9KB53000HP',
                     'usb_port':                        '2-1',
-                    # Color — face recognition
+                    # Color — face recognition (6fps sufficient, keeps DMA budget below LiDAR starvation threshold)
                     'enable_color':                    'true',
                     'color_width':                     '640',
                     'color_height':                    '480',
-                    'color_fps':                       '15',
+                    'color_fps':                       '6',
                     'color_format':                    'MJPG',
                     # IR stereo — cuVSLAM passive tracking
                     'enable_left_ir':                  'true',
