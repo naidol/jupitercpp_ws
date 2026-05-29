@@ -16,15 +16,12 @@ list(APPEND CMAKE_PREFIX_PATH "/opt/nvidia/vpi4")
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(nvblox_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(vpi REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(tf2 REQUIRED)
-find_package(tf2_ros REQUIRED)
 find_package(CURL REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
@@ -32,9 +29,6 @@ find_package(nlohmann_json REQUIRED)
 set(WHISPER_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../whisper.cpp/include")
 set(WHISPER_GGML_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../whisper.cpp/ggml/include")
 set(WHISPER_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../../whisper.cpp/build/src/libwhisper.so")
-
-# sherpa-onnx paths (pre-built aarch64 shared library in workspace root)
-set(SHERPA_ONNX_DIR "$ENV{HOME}/jupitercpp_ws/sherpa-onnx")
 
 # Add all includes explicitly to ensure the compiler sees cv_bridge and VPI
 include_directories(
@@ -44,16 +38,11 @@ include_directories(
   ${cv_bridge_INCLUDE_DIRS}
 )
 
-add_executable(nvblox_slice_relay src/nvblox_slice_relay.cpp)
-ament_target_dependencies(nvblox_slice_relay rclcpp nvblox_msgs)
-
 add_executable(jupiter_vision src/vision.cpp)
 add_executable(imu_covariance_fixer src/imu_covariance_fixer.cpp)
 add_executable(jupiter_voice src/voice.cpp)
 add_executable(jupiter_brain src/brain.cpp)
 add_executable(jupiter_face_recognition src/face_recognition.cpp)
-add_executable(tf_flattener src/tf_flattener.cpp)
-
 # Link ROS2 dependencies
 ament_target_dependencies(jupiter_vision
   rclcpp
@@ -84,13 +73,6 @@ ament_target_dependencies(jupiter_face_recognition
   sensor_msgs
   std_msgs
   cv_bridge
-)
-
-ament_target_dependencies(tf_flattener
-  rclcpp
-  geometry_msgs
-  tf2
-  tf2_ros
 )
 
 # Link Hardware libraries
@@ -136,13 +118,11 @@ target_link_libraries(jupiter_face_recognition
 )
 
 install(TARGETS
-  nvblox_slice_relay
   jupiter_vision
   imu_covariance_fixer
   jupiter_voice
   jupiter_brain
   jupiter_face_recognition
-  tf_flattener
   DESTINATION lib/${PROJECT_NAME}
 )
 
