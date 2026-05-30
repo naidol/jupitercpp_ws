@@ -486,6 +486,10 @@ private:
         // Reset deadline so a stale timeout from a previous query doesn't fire
         // the watchdog the next time is_speaking_ goes true (e.g. an autonomous greeting)
         speak_deadline_ = std::chrono::steady_clock::time_point::max();
+        // Reset empty ASR counter so post-TTS echo doesn't push us into the 4s pause loop.
+        // Without this, room echo after TTS gives Whisper 1-3 empty results, consecutive_empty_asr_
+        // hits 3, and the loop pauses 4s — making the robot appear stuck after every response.
+        consecutive_empty_asr_ = 0;
         is_speaking_ = false;
 
         RCLCPP_INFO(get_logger(), "[LISTENING] Ready");

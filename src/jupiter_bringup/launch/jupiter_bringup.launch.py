@@ -56,12 +56,10 @@ def generate_launch_description():
 
         # ── Hardware layer ────────────────────────────────────────────────────
 
-        # micro-ROS agent — started at 2s, BEFORE the camera (4s).
-        # Orbbec cold-boot init takes ~55s and saturates the tegra-xusb DMA engine,
-        # starving the ESP32 cp210x serial and causing micro-ROS to thrash if it tries
-        # to connect during that window. Starting at 2s lets the connection fully
-        # establish before the camera DMA storm begins.
-        TimerAction(period=2.0, actions=[
+        # micro-ROS agent — started immediately at t=0s.
+        # Bus 001 (ESP32 serial) is completely independent of Bus 002 (camera).
+        # Starting first gets it connected before any DMA activity begins.
+        TimerAction(period=0.0, actions=[
             ExecuteProcess(
                 cmd=['ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
                      'serial', '--dev', '/dev/jupiter_esp32', '-b', '115200'],
@@ -99,13 +97,15 @@ def generate_launch_description():
 
         # ── Perception layer ──────────────────────────────────────────────────
 
-        # Orbbec Gemini 336 — AI-only mode: color-only MJPG 640x480 @ 15fps.
-        # Depth disabled: tegra-xusb shares one DMA engine across all USB ports.
-        # Depth streaming saturates it during Whisper GPU inference, causing MJPG
-        # frame decode failures. Color-only keeps USB bandwidth well within budget.
-        # Not started when enable_voice:=false (SLAM mapping mode) — camera feeds
-        # face recognition which is also disabled; no point starting either.
-        TimerAction(period=4.0, actions=[
+        # Orbbec Gemini 336 — AI-only mode: color + depth(low fps) + IMU.
+        # Started at t=1s — first process on Bus 002, no competition.
+        # Depth at 320x240 @ 5fps is a dummy stream (nobody subscribes) but is
+        # required to avoid a 20s SDK timeout that occurs in color-only mode:
+        # Orbbec SDK 2.7.6 stalls waiting for depth HW init when depth is disabled,
+        # causing ~50s startup. Enabling depth forces the fast init path (~2s).
+        # IMU streams add negligible USB bandwidth and are used by the EKF if
+        # micro-ROS is not available (future use).
+        TimerAction(period=1.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     os.path.join(
@@ -120,10 +120,20 @@ def generate_launch_description():
                     'color_height':               '480',
                     'color_fps':                  '15',
                     'color_format':               'MJPG',
-                    'enable_depth':               'false',
-                    'enable_ir':                  'false',
+                    'enable_depth':               'true',
+                    'depth_width':                '424',
+                    'depth_height':               '240',
+                    'depth_fps':                  '6',
+                    # 424x240@6fps = smallest valid depth profile on Gemini 336.
+                    # See config/orbbec_gemini336_profiles.md — 320x240 does NOT exist.
+                    'enable_laser':               'false',
                     'enable_point_cloud':         'false',
                     'enable_colored_point_cloud': 'false',
+                    'enable_accel':               'true',
+                    'enable_gyro':                'true',
+                    'enable_sync_output_accel_gyro': 'true',
+                    'accel_rate':                 '100hz',
+                    'gyro_rate':                  '100hz',
                 }.items(),
                 condition=IfCondition(PythonExpression([
                     "'", enable_nav, "' == 'false' and '", enable_voice, "' == 'true'"
@@ -213,34 +223,21 @@ def generate_launch_description():
             ),
         ]),
 
-        # Face recognition — delayed 6s so camera is publishing before we subscribe
-        TimerAction(period=6.0, actions=[
-            Node(
-                package='jupiter_nodes',
-                executable='jupiter_face_recognition',
-                name='jupiter_face_recognition',
-                output='screen',
-                parameters=[{
-                    'match_threshold': 0.55,  # SFace paper threshold — 0.40 caused false matches
-                }],
-                condition=IfCondition(enable_voice),
-            ),
-        ]),
-
-        # AprilTag + depth vision node
-        TimerAction(period=6.0, actions=[
-            Node(
-                package='jupiter_nodes',
-                executable='jupiter_vision',
-                name='jupiter_vision',
-                output='screen',
-                condition=IfCondition(enable_voice),
-            ),
-        ]),
-
         # ── Display ───────────────────────────────────────────────────────────
+        # Disable screen saver and DPMS so the 7-inch panel never blanks.
+        # Without this, X11 blanks after 600s idle (no keyboard/mouse input).
+        TimerAction(period=0.0, actions=[
+            ExecuteProcess(
+                cmd=['bash', '-c',
+                     'DISPLAY=:0 XAUTHORITY=/run/user/2002/gdm/Xauthority '
+                     'xset s off s noblank dpms 0 0 0'],
+                output='screen',
+                name='disable_screensaver',
+            ),
+        ]),
 
-        TimerAction(period=2.0, actions=[
+        # Started at t=0s — user sees robot face immediately on power-on.
+        TimerAction(period=0.0, actions=[
             Node(
                 package='jupiter_display',
                 executable='jupiter_display',
@@ -250,33 +247,66 @@ def generate_launch_description():
             ),
         ]),
 
-        # ── Voice + Brain layer ───────────────────────────────────────────────
+        # ── Vision layer ──────────────────────────────────────────────────────
+        # Face recognition and AprilTag vision start at t=3s.
+        # Camera started at t=1s — by t=3s it is past USB enumeration and
+        # the TensorRT engine load (~5s) overlaps with the remaining camera init,
+        # so both are ready at roughly the same time (~t=8s).
+        TimerAction(period=3.0, actions=[
+            Node(
+                package='jupiter_nodes',
+                executable='jupiter_face_recognition',
+                name='jupiter_face_recognition',
+                output='screen',
+                parameters=[{
+                    'match_threshold': 0.55,
+                }],
+                condition=IfCondition(enable_voice),
+            ),
+        ]),
 
-        # Whisper ASR + Piper TTS
-        # Disabled during SLAM mapping (enable_voice:=false): Whisper GPU inference
-        # causes tegra-xusb DMA stalls that can affect cuVSLAM image timing.
-        TimerAction(period=5.0, actions=[
+        TimerAction(period=3.0, actions=[
+            Node(
+                package='jupiter_nodes',
+                executable='jupiter_vision',
+                name='jupiter_vision',
+                output='screen',
+                condition=IfCondition(enable_voice),
+            ),
+        ]),
+
+        # ── Brain layer ───────────────────────────────────────────────────────
+        # Brain connects to Ollama (fast, no GPU load) — start at t=3s.
+        # Ready well before first user interaction.
+        TimerAction(period=3.0, actions=[
+            Node(
+                package='jupiter_nodes',
+                executable='jupiter_brain',
+                name='jupiter_brain',
+                output='screen',
+                condition=IfCondition(enable_voice),
+            ),
+        ]),
+
+        # ── Voice layer ───────────────────────────────────────────────────────
+        # Whisper loads 1.5GB to GPU — started at t=2s.
+        # Camera init completes in ~1s (t=1s start + 0.9s init = done by t=2s).
+        # Whisper takes ~1.5s to load, so Voice is ready by t=3.5s — before the
+        # first face match triggers the greeting (~t=5s). This prevents the race
+        # condition where brain publishes greeting to /tts/input before Voice has
+        # subscribed, leaving the display stuck on the speaking icon forever.
+        # Disabled during SLAM mapping (enable_voice:=false).
+        TimerAction(period=2.0, actions=[
             Node(
                 package='jupiter_nodes',
                 executable='jupiter_voice',
                 name='jupiter_voice',
                 output='screen',
                 parameters=[{
-                    'energy_threshold': 300.0,   # coarse pre-filter; VAD catches steady noise above this
-                    'record_seconds':   4,        # 4s window: speech dominates; 8s let startup zeros break VAD
-                    'vad_snr_ratio':    1.7,      # peak/trough RMS ratio: HVAC≈1.1, speech≈2-10
+                    'energy_threshold': 300.0,
+                    'record_seconds':   4,
+                    'vad_snr_ratio':    1.7,
                 }],
-                condition=IfCondition(enable_voice),
-            ),
-        ]),
-
-        # LLM brain (requires Ollama already running: ollama serve)
-        TimerAction(period=5.0, actions=[
-            Node(
-                package='jupiter_nodes',
-                executable='jupiter_brain',
-                name='jupiter_brain',
-                output='screen',
                 condition=IfCondition(enable_voice),
             ),
         ]),
