@@ -30,12 +30,13 @@ def generate_launch_description():
     enable_nav      = LaunchConfiguration('enable_nav')
     enable_microros = LaunchConfiguration('enable_microros')
     enable_voice    = LaunchConfiguration('enable_voice')
+    enable_camera   = LaunchConfiguration('enable_camera')
 
     return LaunchDescription([
 
         DeclareLaunchArgument(
             'enable_microros',
-            default_value='false',
+            default_value='true',
             description='Set true to start micro-ROS agent (requires ESP32 on /dev/jupiter_esp32).',
         ),
         DeclareLaunchArgument(
@@ -52,6 +53,11 @@ def generate_launch_description():
             'enable_voice',
             default_value='true',
             description='Set false to disable voice/brain nodes (recommended during SLAM mapping — Whisper GPU DMA stalls affect timing).',
+        ),
+        DeclareLaunchArgument(
+            'enable_camera',
+            default_value='false',
+            description='Set true to start the camera from this launch. Default false — run camera.launch.py separately for fast persistent startup.',
         ),
 
         # ── Hardware layer ────────────────────────────────────────────────────
@@ -97,14 +103,9 @@ def generate_launch_description():
 
         # ── Perception layer ──────────────────────────────────────────────────
 
-        # Orbbec Gemini 336 — AI-only mode: color + depth(low fps) + IMU.
-        # Started at t=1s — first process on Bus 002, no competition.
-        # Depth at 320x240 @ 5fps is a dummy stream (nobody subscribes) but is
-        # required to avoid a 20s SDK timeout that occurs in color-only mode:
-        # Orbbec SDK 2.7.6 stalls waiting for depth HW init when depth is disabled,
-        # causing ~50s startup. Enabling depth forces the fast init path (~2s).
-        # IMU streams add negligible USB bandwidth and are used by the EKF if
-        # micro-ROS is not available (future use).
+        # Orbbec Gemini 336 — AI-only mode: color-only MJPG 640x480 @ 15fps.
+        # Known-good fast config — consistently ~2s init when camera firmware warm.
+        # No depth, no IR, no IMU — minimises USB DMA load on Bus 002.
         TimerAction(period=1.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -120,23 +121,14 @@ def generate_launch_description():
                     'color_height':               '480',
                     'color_fps':                  '15',
                     'color_format':               'MJPG',
-                    'enable_depth':               'true',
-                    'depth_width':                '424',
-                    'depth_height':               '240',
-                    'depth_fps':                  '6',
-                    # 424x240@6fps = smallest valid depth profile on Gemini 336.
-                    # See config/orbbec_gemini336_profiles.md — 320x240 does NOT exist.
+                    'enable_depth':               'false',
+                    'enable_ir':                  'false',
                     'enable_laser':               'false',
                     'enable_point_cloud':         'false',
                     'enable_colored_point_cloud': 'false',
-                    'enable_accel':               'true',
-                    'enable_gyro':                'true',
-                    'enable_sync_output_accel_gyro': 'true',
-                    'accel_rate':                 '100hz',
-                    'gyro_rate':                  '100hz',
                 }.items(),
                 condition=IfCondition(PythonExpression([
-                    "'", enable_nav, "' == 'false' and '", enable_voice, "' == 'true'"
+                    "'", enable_nav, "' == 'false' and '", enable_voice, "' == 'true' and '", enable_camera, "' == 'true'"
                 ])),
             ),
         ]),
