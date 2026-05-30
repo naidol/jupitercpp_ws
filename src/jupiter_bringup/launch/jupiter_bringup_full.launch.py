@@ -1,23 +1,19 @@
 # Copyright 2026 Logan Naidoo <naidoo.logan@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 #
-# Full Jupiter bringup — Navigation + Voice + Vision + Brain in one launch.
+# Full Jupiter bringup — single command starts everything.
+# Includes camera.launch.py so no separate terminal is needed.
 #
-# Single Orbbec camera instance serving all subsystems simultaneously:
-#   - Left + Right IR stereo @ 15fps  → cuVSLAM localisation
-#   - Color MJPG 640x480 @ 15fps      → Face recognition
-#   - IMU accel + gyro @ 200Hz        → EKF odometry
-#   - Laser projector OFF             → cuVSLAM passive IR tracking
-#   - Depth disabled                  → saves USB DMA bandwidth
+# Camera (color + IR stereo + IMU) is started first and left running
+# persistently. All other subsystems start after camera is warm.
 #
-# Startup sequence (timed to avoid USB DMA contention):
-#   t=0s  Display
-#   t=2s  micro-ROS agent (ESP32 connects before camera DMA storm)
+# Startup sequence:
+#   t=0s  camera.launch.py  (color + left/right IR + IMU — all streams)
+#   t=0s  Display + screensaver disabled
+#   t=0s  micro-ROS agent
 #   t=3s  Navigation stack (EKF + LiDAR + Nav2 + cuVSLAM)
-#   t=5s  Camera (single instance, all streams)
-#   t=7s  Voice + Brain (after camera is publishing)
-#   t=8s  Face recognition + Vision (after camera is publishing)
-#   t=8s  Nav2 lifecycle manager (5s delay inside navigation.launch.py)
+#   t=4s  Voice/Whisper (camera warm by now, no DMA conflict)
+#   t=5s  Face recognition + Vision + Brain
 #
 # Usage:
 #   ros2 launch jupiter_bringup jupiter_bringup_full.launch.py
@@ -35,7 +31,6 @@ import os
 
 def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
-
     enable_microros = LaunchConfiguration('enable_microros')
 
     return LaunchDescription([
@@ -46,8 +41,28 @@ def generate_launch_description():
             description='Set false to skip micro-ROS agent (ESP32 not connected).',
         ),
 
-        # ── Display ───────────────────────────────────────────────────────────
-        # Started first so the HUD is visible during the rest of bringup.
+        # ── Camera ────────────────────────────────────────────────────────────
+        # Started first and never killed — keeps Orbbec firmware warm.
+        # All streams: color (face recog) + IR stereo (cuVSLAM) + IMU (EKF).
+        TimerAction(period=0.0, actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(bringup_dir, 'launch', 'camera.launch.py')
+                ),
+            ),
+        ]),
+
+        # ── Display + screensaver ─────────────────────────────────────────────
+        TimerAction(period=0.0, actions=[
+            ExecuteProcess(
+                cmd=['bash', '-c',
+                     'DISPLAY=:0 XAUTHORITY=/run/user/2002/gdm/Xauthority '
+                     'xset s off s noblank dpms 0 0 0'],
+                output='screen',
+                name='disable_screensaver',
+            ),
+        ]),
+
         TimerAction(period=0.0, actions=[
             Node(
                 package='jupiter_display',
@@ -59,9 +74,8 @@ def generate_launch_description():
         ]),
 
         # ── micro-ROS agent ───────────────────────────────────────────────────
-        # Started at 2s — before the camera (5s). The Orbbec cold-boot DMA storm
-        # would starve the ESP32 serial if they start together.
-        TimerAction(period=2.0, actions=[
+        # Bus 001 (ESP32) — independent of camera Bus 002.
+        TimerAction(period=0.0, actions=[
             ExecuteProcess(
                 cmd=['ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
                      'serial', '--dev', '/dev/jupiter_esp32', '-b', '115200'],
@@ -73,8 +87,8 @@ def generate_launch_description():
 
         # ── Navigation stack ──────────────────────────────────────────────────
         # EKF + LD20 LiDAR + static TFs + cuVSLAM + Nav2 MPPI.
-        # Nav2 lifecycle manager fires 5s after navigation.launch.py starts
-        # (built-in TimerAction in that file) giving MPPI CUDA time to initialise.
+        # Started at t=3s — camera firmware warm by then, no DMA conflict.
+        # Lifecycle manager fires 5s later (built-in delay in navigation.launch.py).
         TimerAction(period=3.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -83,61 +97,9 @@ def generate_launch_description():
             ),
         ]),
 
-        # ── Orbbec Gemini 336 — full stream mode ──────────────────────────────
-        # Single camera instance serving cuVSLAM (IR stereo) + face recognition
-        # (color) + EKF (IMU) simultaneously.
-        # Laser projector MUST stay OFF — its dot pattern moves with the camera
-        # and causes cuVSLAM to track "moving features", producing massive drift.
-        # Depth disabled — not needed by any current subsystem, saves DMA bandwidth.
-        # Color at MJPG keeps USB bandwidth well below the 3.2 Gbps Bus 002 limit
-        # even with dual IR + color + IMU all streaming together.
-        TimerAction(period=5.0, actions=[
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    os.path.join(
-                        get_package_share_directory('orbbec_camera'),
-                        'launch', 'gemini_330_series.launch.py'
-                    )
-                ),
-                launch_arguments={
-                    'serial_number':                   'CP9KB53000HP',
-                    'usb_port':                        '2-1',
-                    # Color — face recognition (6fps sufficient, keeps DMA budget below LiDAR starvation threshold)
-                    'enable_color':                    'true',
-                    'color_width':                     '640',
-                    'color_height':                    '480',
-                    'color_fps':                       '6',
-                    'color_format':                    'MJPG',
-                    # IR stereo — cuVSLAM passive tracking
-                    'enable_left_ir':                  'true',
-                    'enable_right_ir':                 'true',
-                    'left_ir_width':                   '640',
-                    'left_ir_height':                  '480',
-                    'left_ir_fps':                     '15',
-                    'right_ir_width':                  '640',
-                    'right_ir_height':                 '480',
-                    'right_ir_fps':                    '15',
-                    # Projector OFF — mandatory for cuVSLAM passive IR
-                    'enable_laser':                    'false',
-                    # Depth off — not needed, saves DMA bandwidth
-                    'enable_depth':                    'false',
-                    'enable_point_cloud':              'false',
-                    'enable_colored_point_cloud':      'false',
-                    # IMU — EKF yaw rate fusion
-                    'enable_accel':                    'true',
-                    'enable_gyro':                     'true',
-                    'enable_sync_output_accel_gyro':   'true',
-                    'accel_rate':                      '200hz',
-                    'gyro_rate':                       '200hz',
-                }.items(),
-            ),
-        ]),
-
-        # ── Voice + Brain ─────────────────────────────────────────────────────
-        # Started at 7s — camera needs ~2s to initialise after t=5s launch.
-        # Whisper loads 1.5GB model to GPU; brain connects to Ollama (must be
-        # running: ollama serve).
-        TimerAction(period=7.0, actions=[
+        # ── Voice + Whisper ───────────────────────────────────────────────────
+        # t=4s — camera init done (~2s from cold), Whisper loads 1.5GB to GPU.
+        TimerAction(period=4.0, actions=[
             Node(
                 package='jupiter_nodes',
                 executable='jupiter_voice',
@@ -151,7 +113,9 @@ def generate_launch_description():
             ),
         ]),
 
-        TimerAction(period=7.0, actions=[
+        # ── Brain + Face recognition + Vision ─────────────────────────────────
+        # t=5s — after camera streams are publishing, Whisper nearly loaded.
+        TimerAction(period=5.0, actions=[
             Node(
                 package='jupiter_nodes',
                 executable='jupiter_brain',
@@ -160,9 +124,7 @@ def generate_launch_description():
             ),
         ]),
 
-        # ── Vision + Face recognition ─────────────────────────────────────────
-        # Started at 8s — after camera is confirmed publishing color stream.
-        TimerAction(period=8.0, actions=[
+        TimerAction(period=5.0, actions=[
             Node(
                 package='jupiter_nodes',
                 executable='jupiter_face_recognition',
@@ -174,7 +136,7 @@ def generate_launch_description():
             ),
         ]),
 
-        TimerAction(period=8.0, actions=[
+        TimerAction(period=5.0, actions=[
             Node(
                 package='jupiter_nodes',
                 executable='jupiter_vision',
