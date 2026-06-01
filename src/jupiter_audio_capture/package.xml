@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>jupiter_audio_capture</name>
+  <version>0.1.0</version>
+  <description>
+    Pi5 sub-node: continuous ALSA capture from the ReSpeaker XVF3800 published as
+    a ROS 2 audio topic over the wired link to the Jetson Thor. Decouples raw
+    audio hardware capture from the Thor brain to remove USB/DMA contention.
+  </description>
+  <maintainer email="naidoo.logan@gmail.com">Logan Naidoo</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+
+  <build_depend>libasound2-dev</build_depend>
+  <exec_depend>libasound2</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -213,6 +213,9 @@ public:
         register_pub_  = create_publisher<std_msgs::msg::String>("/vision/register", 10);
         trigger_pub_   = create_publisher<std_msgs::msg::String>("/vision/trigger", 10);
         sleep_pub_     = create_publisher<std_msgs::msg::Bool>("/jupiter/sleeping", 10);
+        // Tells the voice node to relax its 2-word minimum filter so a single-word
+        // name (e.g. "Logan") is accepted during guest registration.
+        expecting_name_pub_ = create_publisher<std_msgs::msg::Bool>("/jupiter/expecting_name", 10);
 
         text_sub_ = create_subscription<std_msgs::msg::String>(
             "/voice/raw_text", 10,
@@ -305,15 +308,16 @@ private:
             save_history(previous);
             history_.clear();
             pending_registration_name_.clear();
-            awaiting_registration_consent_ = false;
+            reg_state_ = RegState::None;
+            set_expecting_name(false);
             return;
         }
 
         std::string greeting;
         if (user == "Guest") {
-            greeting = "Hello! I am Jupiter. I do not think we have met before. "
-                       "Would you like me to remember you? If so, just tell me your name.";
-            awaiting_registration_consent_ = true;
+            greeting = "Hello! I am Jupiter. What is your name?";
+            reg_state_ = RegState::AwaitingName;
+            set_expecting_name(true);
         } else if (history_.empty()) {
             greeting = "Hello " + user + "! Good to see you. How can I help?";
         } else {
@@ -414,7 +418,7 @@ private:
             return;
         }
 
-        if (awaiting_registration_consent_) {
+        if (reg_state_ != RegState::None) {
             handle_registration_flow(user_text);
             return;
         }
@@ -422,9 +426,10 @@ private:
         // Known user explicitly asking to register a new person in front of the camera
         if (is_register_command(user_text) && current_user_ != "Unknown" && current_user_ != "Guest") {
             RCLCPP_INFO(get_logger(), "Register command from %s — prompting for new user", current_user_.c_str());
-            awaiting_registration_consent_ = true;
+            reg_state_ = RegState::AwaitingName;
+            set_expecting_name(true);
             speak("Sure! Please have the person stand clearly in front of me. "
-                  "Hello there! Would you like me to register you? Please say yes or no.");
+                  "What is your name?");
             return;
         }
 
@@ -720,29 +725,62 @@ private:
             return false;
         };
 
-        if (contains_word("no") || contains_word("nope") || contains_word("not now") ||
-            lower.find("don't want") != std::string::npos ||
-            lower.find("do not want") != std::string::npos) {
-            awaiting_registration_consent_ = false;
-            speak("No problem! I will call you Guest. How can I help you today?");
+        // ── Awaiting the name ────────────────────────────────────────────────
+        if (reg_state_ == RegState::AwaitingName) {
+            // User declines to register
+            if (contains_word("no") || contains_word("nope") || contains_word("not now") ||
+                lower.find("don't want") != std::string::npos ||
+                lower.find("do not want") != std::string::npos) {
+                reg_state_ = RegState::None;
+                set_expecting_name(false);
+                speak("No problem! I will call you Guest. How can I help you today?");
+                return;
+            }
+
+            const std::string name = extract_name(user_text);
+            if (name.empty()) {
+                // Stay in AwaitingName, filter stays relaxed — re-prompt.
+                speak("Sorry, I did not catch your name. Please say it again.");
+                return;
+            }
+
+            pending_registration_name_ = name;
+            reg_state_ = RegState::AwaitingConfirmation;
+            // Filter stays relaxed so single-word "yes"/"no" is accepted.
+            speak("I heard " + name + ". Is that correct? Please say yes or no.");
             return;
         }
 
-        const std::string name = extract_name(user_text);
-        if (name.empty()) {
-            speak("Sorry, I did not catch your name. Could you say it again?");
+        // ── Awaiting yes/no confirmation of the heard name ───────────────────
+        if (reg_state_ == RegState::AwaitingConfirmation) {
+            if (contains_word("yes") || contains_word("yeah") || contains_word("yep") ||
+                contains_word("correct") || contains_word("right")) {
+                const std::string name = pending_registration_name_;
+                speak("Great! Let me take a look at you to remember your face.");
+
+                std_msgs::msg::String reg_msg;
+                reg_msg.data = name;
+                register_pub_->publish(reg_msg);
+
+                reg_state_ = RegState::None;
+                set_expecting_name(false);
+                pending_registration_name_.clear();
+                current_user_ = name;  // prevent user_callback double-greeting on next tick
+                speak("Done! I will remember you as " + name + " from now on. How can I help?");
+                return;
+            }
+
+            if (contains_word("no") || contains_word("nope") || contains_word("wrong")) {
+                pending_registration_name_.clear();
+                reg_state_ = RegState::AwaitingName;
+                speak("Sorry about that. Please tell me your name again.");
+                return;
+            }
+
+            // Unclear answer — re-ask the confirmation.
+            speak("Please say yes or no. Is your name " + pending_registration_name_ + "?");
             return;
         }
-
-        speak("Nice to meet you, " + name + "! Let me take a look at you to remember your face.");
-
-        std_msgs::msg::String reg_msg;
-        reg_msg.data = name;
-        register_pub_->publish(reg_msg);
-
-        awaiting_registration_consent_ = false;
-        current_user_ = name;  // prevent user_callback double-greeting on next 1Hz tick
-        speak("Done! I will remember you as " + name + " from now on. How can I help?");
     }
 
     void speak(const std::string& text) {
@@ -755,6 +793,15 @@ private:
         std_msgs::msg::Bool msg;
         msg.data = sleeping;
         sleep_pub_->publish(msg);
+    }
+
+    // Tell the voice node whether to relax its 2-word minimum filter.
+    // Relaxed while we await a name or a yes/no confirmation, so single-word
+    // answers ("Logan", "yes", "no") are not dropped as hallucinations.
+    void set_expecting_name(bool expecting) {
+        std_msgs::msg::Bool msg;
+        msg.data = expecting;
+        expecting_name_pub_->publish(msg);
     }
 
     // ── Members ───────────────────────────────────────────────────────────────
@@ -770,7 +817,9 @@ private:
     int         max_history_turns_{10};
 
     std::string current_user_{"Unknown"};
-    bool        awaiting_registration_consent_{false};
+    // Registration state machine: None → AwaitingName → AwaitingConfirmation → None
+    enum class RegState { None, AwaitingName, AwaitingConfirmation };
+    RegState    reg_state_{RegState::None};
     std::string pending_registration_name_;
     float       battery_percentage_{0.0f};
     float       battery_voltage_{0.0f};
@@ -787,6 +836,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    register_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    trigger_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr      sleep_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr      expecting_name_pub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr text_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr user_sub_;
     rclcpp::Subscription<sensor_msgs::msg::BatteryState>::SharedPtr battery_sub_;

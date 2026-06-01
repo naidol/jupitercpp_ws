@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Jupiter Voice Node
-// PipeWire capture (pw-record via fork/exec) → whisper.cpp ASR → /voice/raw_text
-// /voice/response_text → piper TTS (pw-cat)
+// Audio capture is offloaded to the Raspberry Pi 5 sub-node (see
+// jupiter_audio_capture): this node SUBSCRIBES to /audio/mic_raw (16 kHz mono
+// S16 frames over the wired link), accumulates them into analysis windows, and
+// feeds whisper.cpp ASR → /voice/raw_text. /voice/response_text → piper TTS.
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
+#include <std_msgs/msg/int16_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include "whisper.h"
@@ -18,9 +22,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
-#include <fcntl.h>
-#include <fstream>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <sys/wait.h>
@@ -92,10 +95,30 @@ public:
             "/voice/response_text", 10,
             std::bind(&JupiterVoice::response_callback, this, std::placeholders::_1));
 
+        // Brain raises this while awaiting a name or yes/no confirmation during
+        // guest registration — relaxes the 2-word minimum so single-word answers
+        // ("Logan", "yes", "no") are not dropped as hallucinations.
+        expecting_name_sub_ = create_subscription<std_msgs::msg::Bool>(
+            "/jupiter/expecting_name", 10,
+            [this](const std_msgs::msg::Bool::SharedPtr msg) {
+                expecting_name_.store(msg->data);
+                RCLCPP_INFO(get_logger(), "[REG] expecting_name = %s",
+                            msg->data ? "true" : "false");
+            });
+
+        // Audio arrives from the Pi 5 capture node as continuous 16 kHz mono S16
+        // frames. Best-Effort + shallow history to match the publisher and keep
+        // latency low on the wired link. The callback just appends to accum_.
+        rclcpp::QoS audio_qos(rclcpp::KeepLast(50));
+        audio_qos.best_effort();
+        audio_sub_ = create_subscription<std_msgs::msg::Int16MultiArray>(
+            "/audio/mic_raw", audio_qos,
+            std::bind(&JupiterVoice::audio_callback, this, std::placeholders::_1));
+
         audio_thread_ = std::thread(&JupiterVoice::audio_loop, this);
 
-        RCLCPP_INFO(get_logger(), "Jupiter Voice online — pw-record capture + whisper.cpp ASR + piper TTS");
-        RCLCPP_INFO(get_logger(), "Recording %ds chunks @ %dHz  |  VAD SNR ratio %.1f  |  model: %s",
+        RCLCPP_INFO(get_logger(), "Jupiter Voice online — /audio/mic_raw subscriber + whisper.cpp ASR + piper TTS");
+        RCLCPP_INFO(get_logger(), "Window %ds @ %dHz  |  VAD SNR ratio %.1f  |  model: %s",
             record_seconds_, sample_rate_, vad_snr_ratio_, whisper_model_.c_str());
     }
 
@@ -103,8 +126,6 @@ public:
         running_ = false;
         const pid_t tts = tts_pid_.load();
         if (tts > 0) ::kill(tts, SIGTERM);
-        const pid_t rec = capture_pid_.load();
-        if (rec > 0) ::kill(rec, SIGTERM);
         if (audio_thread_.joinable()) {
             audio_thread_.join();
         }
@@ -133,6 +154,12 @@ private:
         // Minimum peak-to-trough RMS ratio across 100ms windows to classify as speech.
         // HVAC steady noise ≈ 1.05-1.2; speech (starts/stops/pauses) ≈ 2.0-10.0.
         declare_parameter("vad_snr_ratio",      1.7);
+        // TTS output sink — route playback to HDMI (7-inch display speaker) so it
+        // does NOT play through the ReSpeaker. Playing TTS through the ReSpeaker's
+        // own output wedges its USB mic capture into silence (energy ~21). Keeping
+        // the ReSpeaker capture-only avoids the full-duplex wedge. Empty = default sink.
+        declare_parameter("tts_sink",
+            std::string("alsa_output.platform-88090b0000.hda.hdmi-stereo"));
 
         whisper_model_      = get_parameter("whisper_model").as_string();
         piper_binary_       = get_parameter("piper_binary").as_string();
@@ -145,6 +172,7 @@ private:
         response_timeout_s_ = get_parameter("response_timeout_s").as_int();
         asr_cooldown_s_     = get_parameter("asr_cooldown_s").as_int();
         vad_snr_ratio_      = static_cast<float>(get_parameter("vad_snr_ratio").as_double());
+        tts_sink_           = get_parameter("tts_sink").as_string();
     }
 
     // ── Initialisation ────────────────────────────────────────────────────────
@@ -224,12 +252,31 @@ private:
         return (max_rms / min_rms) > vad_snr_ratio_;
     }
 
-    // ── Audio capture loop (background thread) ────────────────────────────────
+    // ── Audio ingestion ───────────────────────────────────────────────────────
 
+    // Frames arrive from the Pi 5 capture node. Append to the accumulator unless
+    // we are currently speaking (drop our own TTS-era audio). Runs on the executor
+    // thread; accum_ is shared with the audio_loop processing thread.
+    void audio_callback(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
+        last_audio_rx_ = std::chrono::steady_clock::now();
+        if (is_speaking_.load()) return;  // ignore frames during TTS playback
+        std::lock_guard<std::mutex> lock(accum_mutex_);
+        accum_.insert(accum_.end(), msg->data.begin(), msg->data.end());
+        // Bound growth if the processing thread ever stalls — keep at most 2 windows.
+        const size_t cap = static_cast<size_t>(sample_rate_) * record_seconds_ * 2;
+        if (accum_.size() > cap) {
+            accum_.erase(accum_.begin(), accum_.end() - cap);
+        }
+    }
+
+    // Processing loop (background thread): pulls full windows from accum_ and runs
+    // the energy gate / VAD / Whisper pipeline — identical logic to the old
+    // pw-record path, just sourced from the streamed accumulator.
     void audio_loop() {
-        const std::string tmp_file =
-            "/tmp/jupiter_capture_" + std::to_string(getpid()) + ".raw";
+        const size_t window = static_cast<size_t>(sample_rate_) * record_seconds_;
         bool was_speaking = false;
+        last_audio_rx_ = std::chrono::steady_clock::now();
+        auto last_stale_warn = std::chrono::steady_clock::now();
 
         while (running_ && rclcpp::ok()) {
             if (is_speaking_.load()) {
@@ -238,6 +285,7 @@ private:
                     RCLCPP_WARN(get_logger(), "[WATCHDOG] No response received — resuming listening");
                     is_speaking_ = false;
                 }
+                { std::lock_guard<std::mutex> lock(accum_mutex_); accum_.clear(); }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
@@ -245,29 +293,52 @@ private:
             if (was_speaking) {
                 was_speaking = false;
                 last_asr_run_ = std::chrono::steady_clock::time_point{};
+                // Discard anything buffered during/just after TTS so the next
+                // utterance starts on a clean window.
+                std::lock_guard<std::mutex> lock(accum_mutex_);
+                accum_.clear();
             }
 
-            const std::vector<int16_t> buf = capture_chunk(tmp_file);
-            if (buf.empty()) continue;
+            // Pull one full window from the accumulator, if ready.
+            std::vector<int16_t> buf;
+            {
+                std::lock_guard<std::mutex> lock(accum_mutex_);
+                if (accum_.size() >= window) {
+                    buf.assign(accum_.begin(), accum_.begin() + window);
+                    accum_.erase(accum_.begin(), accum_.begin() + window);
+                }
+            }
+
+            if (buf.empty()) {
+                // No full window yet. Warn (throttled) if the Pi 5 stream has gone silent.
+                const auto now = std::chrono::steady_clock::now();
+                if (now - last_audio_rx_.load() > std::chrono::seconds(5) &&
+                    now - last_stale_warn > std::chrono::seconds(10)) {
+                    RCLCPP_WARN(get_logger(),
+                        "[AUDIO] no frames on /audio/mic_raw for >5s — is the Pi 5 capture node running?");
+                    last_stale_warn = now;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
 
             if (is_speaking_.load()) continue;
 
-            // Reject captures shorter than 1 second — PipeWire briefly glitches after
-            // TTS (pw-cat) finishes, causing pw-record to exit early with only 200-300ms
-            // of audio.  These short buffers bypass the temporal VAD (n_windows < 4
-            // early-return path) and hit Whisper with nothing to transcribe, triggering
-            // the consecutive-empty stuck loop.
-            if (buf.size() < static_cast<size_t>(sample_rate_)) continue;
-
             const float energy = compute_rms_energy(buf);
-            RCLCPP_DEBUG(get_logger(), "[VAD] RMS %.0f  threshold %.0f", energy, energy_threshold_);
-            if (energy < energy_threshold_) continue;
+            if (energy < energy_threshold_) {
+                RCLCPP_INFO(get_logger(), "[VAD] low energy %.0f < %.0f — skipping",
+                            energy, energy_threshold_);
+                continue;
+            }
 
             // Temporal energy ratio VAD — gates Whisper on CPU before touching the GPU.
             // Prevents the GPU spike (idle→1575MHz) that causes desktop jitter on every
             // ambient-noise capture.
-            if (!vad_has_speech(buf)) {
-                RCLCPP_DEBUG(get_logger(), "[VAD] Steady noise (RMS %.0f) — skipping Whisper", energy);
+            // Bypassed during registration: short single words ("Logan", "yes", "no")
+            // lack the start/stop/pause structure the ratio VAD expects, so it wrongly
+            // classifies them as "steady noise". The energy gate above still applies.
+            if (!expecting_name_.load() && !vad_has_speech(buf)) {
+                RCLCPP_INFO(get_logger(), "[VAD] steady noise (RMS %.0f) — skipping Whisper", energy);
                 continue;
             }
 
@@ -311,8 +382,10 @@ private:
                     if (c != ' ' && !in_word) { ++word_count; in_word = true; }
                     else if (c == ' ')         { in_word = false; }
                 }
-                if (word_count < 2) {
-                    RCLCPP_DEBUG(get_logger(), "[ASR] Single-word result filtered: %s", text.c_str());
+                // During registration we expect single-word answers ("Logan",
+                // "yes", "no"), so the 2-word minimum is bypassed in that window.
+                if (word_count < 2 && !expecting_name_.load()) {
+                    RCLCPP_INFO(get_logger(), "[ASR] single-word result filtered: '%s'", text.c_str());
                     continue;
                 }
             }
@@ -327,77 +400,6 @@ private:
             speak_deadline_ = std::chrono::steady_clock::now() +
                               std::chrono::seconds(response_timeout_s_);
         }
-        std::remove(tmp_file.c_str());
-    }
-
-    // Fork pw-record directly — no shell wrapper, so we hold the PID and can
-    // kill it immediately on shutdown without waiting for the full chunk duration.
-    std::vector<int16_t> capture_chunk(const std::string& tmp_file) {
-        const pid_t pid = fork();
-        if (pid == 0) {
-            // Child: redirect stderr to /dev/null, exec pw-record
-            const int devnull = open("/dev/null", O_WRONLY);
-            if (devnull >= 0) {
-                dup2(devnull, STDERR_FILENO);
-                close(devnull);
-            }
-            execlp("pw-record", "pw-record",
-                   "--rate",     std::to_string(sample_rate_).c_str(),
-                   "--format",   "s16",
-                   "--channels", "1",
-                   tmp_file.c_str(),
-                   nullptr);
-            _exit(1);
-        }
-        if (pid < 0) return {};
-
-        capture_pid_.store(pid);
-
-        // Poll until record_seconds_ elapsed OR shutdown requested
-        const auto deadline = std::chrono::steady_clock::now() +
-                              std::chrono::seconds(record_seconds_);
-        while (running_.load() && rclcpp::ok()) {
-            int status;
-            if (waitpid(pid, &status, WNOHANG) != 0) {
-                capture_pid_.store(-1);
-                break;
-            }
-            if (std::chrono::steady_clock::now() >= deadline) {
-                ::kill(pid, SIGTERM);
-                // Normal end-of-chunk: SIGTERM is enough, pw-record exits quickly.
-                // Use a non-blocking poll so SA_RESTART can't pin this thread.
-                for (int i = 0; i < 20; ++i) {
-                    int st;
-                    if (::waitpid(pid, &st, WNOHANG) != 0) break;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-                capture_pid_.store(-1);
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-
-        if (!running_.load() || !rclcpp::ok()) {
-            // Shutdown path — SIGKILL guarantees immediate termination so that
-            // waitpid() returns in microseconds.  SA_RESTART (set by rclcpp's
-            // signal handler) would cause a blocking waitpid() to never return
-            // after SIGTERM, hanging the audio thread indefinitely.
-            ::kill(pid, SIGKILL);
-            waitpid(pid, nullptr, 0);
-            capture_pid_.store(-1);
-            std::remove(tmp_file.c_str());
-            return {};
-        }
-
-        std::ifstream f(tmp_file, std::ios::binary | std::ios::ate);
-        if (!f) return {};
-        const auto bytes = static_cast<std::size_t>(f.tellg());
-        if (bytes < 2) return {};
-        f.seekg(0);
-        std::vector<int16_t> buf(bytes / 2);
-        f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(bytes));
-        std::remove(tmp_file.c_str());
-        return buf;
     }
 
     // ── ASR ───────────────────────────────────────────────────────────────────
@@ -479,8 +481,11 @@ private:
 
         is_speaking_ = true;
         speak(text);
-        // Brief pause so room echo from TTS playback dies down before next capture
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // Pause so room echo from TTS playback dies down before next capture.
+        // 1200ms needed for longer registration prompts — shorter caused echo
+        // bleed into the recording window, making Whisper transcribe TTS echo
+        // instead of the user's name response.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
         // Signal display to return to LISTENING — exact timing, no word-count estimate
         tts_done_pub_->publish(std_msgs::msg::Empty{});
         // Reset deadline so a stale timeout from a previous query doesn't fire
@@ -497,11 +502,15 @@ private:
 
     void speak(const std::string& text) {
         const std::string safe = sanitize_for_shell(text);
+        // Route playback to a specific sink (HDMI) when tts_sink_ is set, so TTS
+        // does not play through the ReSpeaker and wedge its mic capture.
+        const std::string target = tts_sink_.empty() ? "" : (" --target " + tts_sink_);
         const std::string cmd =
             "echo '" + safe + "' | " +
             piper_binary_ + " --model " + piper_model_ +
             " --output_raw 2>/dev/null"
-            " | pw-cat --playback --rate 22050 --format s16 --channels 1 - 2>/dev/null";
+            " | pw-cat --playback" + target +
+            " --rate 22050 --format s16 --channels 1 - 2>/dev/null";
 
         // Fork instead of std::system() so we can kill the child on SIGINT
         // without blocking the ROS spin thread for the full TTS duration.
@@ -534,16 +543,21 @@ private:
     std::string      whisper_language_{"en"};
     int              whisper_threads_{4};
 
-    // Capture / TTS child PIDs — stored atomically so destructor can kill them
     int                    sample_rate_{16000};
     int                    record_seconds_{5};
     float                  energy_threshold_{300.0f};
-    std::atomic<pid_t>     capture_pid_{-1};
-    std::atomic<pid_t>     tts_pid_{-1};
+    std::atomic<pid_t>     tts_pid_{-1};  // TTS child PID — destructor kills it
+
+    // Audio accumulator — fed by audio_callback (executor thread), drained in
+    // window-sized chunks by audio_loop (processing thread).
+    std::vector<int16_t>   accum_;
+    std::mutex             accum_mutex_;
+    std::atomic<std::chrono::steady_clock::time_point> last_audio_rx_{std::chrono::steady_clock::time_point{}};
 
     // Piper TTS
     std::string piper_binary_;
     std::string piper_model_;
+    std::string tts_sink_;
 
     // Threading / state
     std::thread            audio_thread_;
@@ -562,6 +576,9 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    text_pub_;
     rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr     tts_done_pub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr response_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   expecting_name_sub_;
+    rclcpp::Subscription<std_msgs::msg::Int16MultiArray>::SharedPtr audio_sub_;
+    std::atomic<bool>                                      expecting_name_{false};
 };
 
 
