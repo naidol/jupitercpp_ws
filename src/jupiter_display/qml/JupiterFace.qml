@@ -393,6 +393,40 @@ Window {
         }
     }
 
+    // ── TTS caption ────────────────────────────────────────────────────────────
+    // Shows what Jupiter is saying so a guest can READ it — e.g. confirm the
+    // spelling of a name during registration ("I heard Logan. Is that correct?")
+    // and read the yes/no prompt. Stays visible until the next response replaces
+    // it, so it persists through the LISTENING window while the user answers.
+    Rectangle {
+        id: captionBand
+        anchors.bottom: statusBar.top
+        anchors.bottomMargin: root.height * 0.02
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: root.width * 0.92
+        height: captionText.paintedHeight + root.height * 0.045
+        radius: root.height * 0.018
+        color: "#141428"
+        border.color: bridge.state === 2 ? "#00AAFF" : "#2A2A44"
+        border.width: 1
+        visible: captionText.text.length > 0 && !bridge.sleeping
+
+        Behavior on border.color { ColorAnimation { duration: 200 } }
+
+        Text {
+            id: captionText
+            anchors.centerIn: parent
+            width: parent.width - root.width * 0.05
+            text: bridge.lastResponse
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+            maximumLineCount: 3
+            elide: Text.ElideRight
+            font.pixelSize: root.height * 0.040
+            color: "#E0F7FF"
+        }
+    }
+
     // ── Bottom status bar ─────────────────────────────────────────────────────
     Rectangle {
         id: statusBar
