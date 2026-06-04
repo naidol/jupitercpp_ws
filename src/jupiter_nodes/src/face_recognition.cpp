@@ -74,23 +74,22 @@ public:
     std::vector<float> embed(const cv::Mat& aligned_bgr_112) {
         if (!context_ || aligned_bgr_112.empty()) return {};
 
-        // Preprocess: BGR uint8 → RGB float32 NCHW, normalised to [-1, 1]
-        // SFace expects: (pixel - 127.5) / 127.5 with BGR→RGB swap
+        // Preprocess to match OpenCV SFace (face_recognition_sface_2021dec):
+        // raw BGR, 0-255 float, NCHW — NO normalisation, NO channel swap.
+        // OpenCV's FaceRecognizerSF feeds the model via cv::dnn::blobFromImage with
+        // default params (scale=1.0, mean=0, swapRB=false). The previous RGB + [-1,1]
+        // preprocessing distorted the embedding space so different faces scored 0.9+
+        // against each other — collapsing discrimination (e.g. a different person
+        // matched as the registered user). Existing profiles MUST be re-registered
+        // after this change (old embeddings live in the old, distorted space).
         constexpr int kChannels = 3, kH = 112, kW = 112;
         const int pixels = kChannels * kH * kW;
         std::vector<float> host_input(pixels);
 
-        cv::Mat rgb;
-        cv::cvtColor(aligned_bgr_112, rgb, cv::COLOR_BGR2RGB);
-
-        const float* src_r = nullptr;
-        const float* src_g = nullptr;
-        const float* src_b = nullptr;
-
         cv::Mat fmat;
-        rgb.convertTo(fmat, CV_32F, 1.0 / 127.5, -1.0);   // [0,255] → [-1,1]
+        aligned_bgr_112.convertTo(fmat, CV_32F);   // 0-255 float, BGR preserved
 
-        // Split into planes and pack as NCHW
+        // Split into planes and pack as NCHW (B, G, R order)
         std::vector<cv::Mat> planes(3);
         cv::split(fmat, planes);
         const int plane_size = kH * kW;

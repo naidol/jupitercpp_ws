@@ -251,7 +251,7 @@ def generate_launch_description():
                 name='jupiter_face_recognition',
                 output='screen',
                 parameters=[{
-                    'match_threshold': 0.55,
+                    'match_threshold': 0.40,
                 }],
                 condition=IfCondition(enable_voice),
             ),
