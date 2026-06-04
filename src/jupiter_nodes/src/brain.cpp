@@ -315,7 +315,9 @@ private:
 
         std::string greeting;
         if (user == "Guest") {
-            greeting = "Hello! I am Jupiter. What is your name?";
+            greeting = "Hello! I am Jupiter. I do not think we have met. "
+                       "To register you, please tell me your name — "
+                       "just say, my name is, and then your name.";
             reg_state_ = RegState::AwaitingName;
             set_expecting_name(true);
         } else if (history_.empty()) {
@@ -429,7 +431,7 @@ private:
             reg_state_ = RegState::AwaitingName;
             set_expecting_name(true);
             speak("Sure! Please have the person stand clearly in front of me. "
-                  "What is your name?");
+                  "Then say, my name is, and then your name.");
             return;
         }
 
@@ -740,7 +742,8 @@ private:
             const std::string name = extract_name(user_text);
             if (name.empty()) {
                 // Stay in AwaitingName, filter stays relaxed — re-prompt.
-                speak("Sorry, I did not catch your name. Please say it again.");
+                speak("Sorry, I did not catch your name. "
+                      "Please say, my name is, and then your name.");
                 return;
             }
 
