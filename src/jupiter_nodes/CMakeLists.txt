@@ -17,6 +17,7 @@ list(APPEND CMAKE_PREFIX_PATH "/opt/nvidia/vpi4")
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
@@ -43,7 +44,14 @@ add_executable(imu_covariance_fixer src/imu_covariance_fixer.cpp)
 add_executable(jupiter_voice src/voice.cpp)
 add_executable(jupiter_brain src/brain.cpp)
 add_executable(jupiter_face_recognition src/face_recognition.cpp)
+add_executable(scan_deskew_node src/scan_deskew_node.cpp)
 # Link ROS2 dependencies
+ament_target_dependencies(scan_deskew_node
+  rclcpp
+  sensor_msgs
+  nav_msgs
+)
+
 ament_target_dependencies(jupiter_vision
   rclcpp
   sensor_msgs
@@ -123,6 +131,7 @@ install(TARGETS
   jupiter_voice
   jupiter_brain
   jupiter_face_recognition
+  scan_deskew_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
