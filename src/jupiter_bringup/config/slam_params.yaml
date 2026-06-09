@@ -25,7 +25,7 @@ slam_toolbox:
     transform_publish_period: 0.02
     map_update_interval: 1.5
     resolution: 0.05
-    max_laser_range: 7.5
+    max_laser_range: 18.0    # RPLIDAR S2E reaches 30 m; 18 m exploits it down hallways (LD20 path unaffected — it caps ~8 m)
     minimum_time_interval: 0.5
     transform_timeout: 0.5
     tf_buffer_duration: 30.0
