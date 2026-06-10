@@ -64,8 +64,12 @@ def generate_launch_description():
             'update_mesh_rate_hz':       2.0,
             'publish_layer_rate_hz':     5.0,
 
-            # Memory — clear the map beyond 5 m of the robot
-            'map_clearing_radius_m':     5.0,
+            # Memory — clear the map beyond this radius of the robot. 2026-06-10: 5.0 -> 2.5.
+            # static_tsdf accumulates+keeps everything within this radius and never forgets it,
+            # so a large radius bakes in phantom obstacles (bootstrap-pose integration + drift)
+            # that boxed the robot in. 2.5 m covers the 4x4 m local costmap and constantly
+            # refreshes near the robot, wiping stale phantoms as it moves.
+            'map_clearing_radius_m':     2.5,
             'map_clearing_frame_id':     'base_footprint',
 
             # Publish the ESDF distance slice consumed by NvbloxCostmapLayer

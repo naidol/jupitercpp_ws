@@ -155,7 +155,7 @@ local_costmap:
       # legs, feet) that the S2E lidar at 0.515 m is blind to. 2026-06-10.
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
-        enabled: true
+        enabled: true    # re-enabled 2026-06-10 after shrinking nvblox map_clearing_radius 5.0->2.5 to stop phantom accumulation
         nvblox_map_slice_topic: "/nvblox_node/static_map_slice"
         max_obstacle_distance: 1.0
         inflation_distance: 0.0
@@ -167,7 +167,7 @@ local_costmap:
         # inflation_radius one step at a time (0.45 -> 0.40 -> 0.35 ...) until it just fits the
         # doors. This is the single tuning dial; leave everything else fixed while turning it.
         cost_scaling_factor: 3.0
-        inflation_radius: 0.45
+        inflation_radius: 0.35   # 2026-06-10: 0.45 closed the lab doorway (MPPI couldn't fit the footprint); stepped down one notch
       always_send_full_costmap: true
 
 global_costmap:
@@ -212,7 +212,7 @@ global_costmap:
       # furniture the S2E lidar misses (not just the local controller). 2026-06-10.
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
-        enabled: true
+        enabled: true    # re-enabled 2026-06-10 after shrinking nvblox map_clearing_radius 5.0->2.5 to stop phantom accumulation
         nvblox_map_slice_topic: "/nvblox_node/static_map_slice"
         max_obstacle_distance: 1.0
         inflation_distance: 0.0
@@ -224,7 +224,7 @@ global_costmap:
         # inflation_radius one step at a time (0.45 -> 0.40 -> 0.35 ...) until it just fits the
         # doors. This is the single tuning dial; leave everything else fixed while turning it.
         cost_scaling_factor: 3.0
-        inflation_radius: 0.45
+        inflation_radius: 0.35   # 2026-06-10: matched to local costmap; 0.45 closed the lab doorway
       always_send_full_costmap: true
 
 planner_server:
@@ -333,8 +333,10 @@ amcl:
     alpha3: 0.2
     alpha4: 0.2
     alpha5: 0.2
-    update_min_a: 0.15
-    update_min_d: 0.2
+    update_min_a: 0.1   # 2026-06-10: was 0.15 — correct heading more often
+    update_min_d: 0.05  # 2026-06-10: was 0.2 — AMCL ran open-loop on odometry between 0.2m corrections;
+                        # the pose slid off the map during the doorway approach (scan drifted right, robot
+                        # clipped the jamb). 0.05m = ~4x more frequent scan corrections -> pose stays snapped.
     resample_interval: 1
     transform_tolerance: 1.0
     recovery_alpha_slow: 0.0
