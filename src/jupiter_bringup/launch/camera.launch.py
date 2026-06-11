@@ -35,7 +35,7 @@ def generate_launch_description():
             ),
             launch_arguments={
                 'serial_number':                   'CP9KB53000HP',
-                'usb_port':                        '2-1',
+                'usb_port':                        '',
                 # Color — face recognition
                 'enable_color':                    'true',
                 'color_width':                     '640',

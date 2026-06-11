@@ -116,7 +116,7 @@ def generate_launch_description():
                 ),
                 launch_arguments={
                     'serial_number':              'CP9KB53000HP',
-                    'usb_port':                   '2-1',
+                    'usb_port':                   '',
                     'color_width':                '640',
                     'color_height':               '480',
                     'color_fps':                  '15',
@@ -147,7 +147,7 @@ def generate_launch_description():
                 ),
                 launch_arguments={
                     'serial_number':                   'CP9KB53000HP',
-                    'usb_port':                        '2-1',
+                    'usb_port':                        '',
                     'color_width':                     '640',
                     'color_height':                    '480',
                     'color_fps':                       '15',
@@ -189,7 +189,7 @@ def generate_launch_description():
                 ),
                 launch_arguments={
                     'serial_number':                   'CP9KB53000HP',
-                    'usb_port':                        '2-1',
+                    'usb_port':                        '',
                     'enable_color':                    'false',
                     'enable_depth':                    'false',
                     'enable_left_ir':                  'true',

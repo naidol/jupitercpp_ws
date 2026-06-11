@@ -86,7 +86,7 @@ def generate_launch_description():
                 get_package_share_directory('orbbec_camera'),
                 'launch', 'gemini_330_series.launch.py')),
             launch_arguments={
-                'serial_number': 'CP9KB53000HP', 'usb_port': '2-1',
+                'serial_number': 'CP9KB53000HP', 'usb_port': '',
                 'enable_color': 'true', 'color_width': '640', 'color_height': '480',
                 'color_fps': '15', 'color_format': 'MJPG',
                 'enable_depth': 'true', 'depth_width': '640', 'depth_height': '480',

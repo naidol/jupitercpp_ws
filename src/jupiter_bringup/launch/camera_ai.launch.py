@@ -31,7 +31,7 @@ def generate_launch_description():
             ),
             launch_arguments={
                 'serial_number':                   'CP9KB53000HP',
-                'usb_port':                        '2-1',
+                'usb_port':                        '',
                 # Color only — face recognition. No IR (saves DMA for ReSpeaker).
                 'enable_color':                    'true',
                 'color_width':                     '640',
