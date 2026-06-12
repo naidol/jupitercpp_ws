@@ -48,14 +48,19 @@ def generate_launch_description():
             'mapping_type':              'static_tsdf',
 
             # 2D ESDF slice for the Nav2 costmap.
-            # Height band LOWERED vs the old cuVSLAM config (which ignored everything
-            # below 0.4 m) so we actually catch LOW furniture — the whole point of the
-            # camera. min 0.10 m clears floor noise; raise toward 0.15 if the floor
-            # bleeds in, lower toward 0.05 if low obstacles get missed.
+            # *** 2026-06-12 BUGFIX: the height-band params were named esdf_2d_min_height /
+            # esdf_2d_max_height -- those names DO NOT EXIST in nvblox, so they were SILENTLY
+            # IGNORED and nvblox used the defaults esdf_slice_min_height=0.0 / max=1.0. That
+            # sliced FROM THE FLOOR (0.0 m) upward, marking the floor itself (worsened by the
+            # ~1.3deg camera pitch) as an obstacle carpet -> robot boxed in with "collision
+            # ahead" the instant it tried to move in any cluttered room. Correct names verified
+            # in /opt/ros/jazzy/include/nvblox/integrators/esdf_integrator_params.h. ***
+            # min 0.10 m clears the floor; raise toward 0.15 if the floor still bleeds in,
+            # lower toward 0.05 if low obstacles get missed. max 1.80 catches tall furniture.
             'esdf_mode':                 '2d',
-            'esdf_slice_height':         0.30,
-            'esdf_2d_min_height':        0.10,
-            'esdf_2d_max_height':        1.80,
+            'esdf_slice_height':         0.30,   # output slice Z (metadata; correct name, was already applied)
+            'esdf_slice_min_height':     0.10,   # was esdf_2d_min_height (WRONG NAME -> ignored -> floor marked)
+            'esdf_slice_max_height':     1.80,   # was esdf_2d_max_height (WRONG NAME -> ignored)
 
             # Rates — tuned for the ~5–15 fps Orbbec depth stream
             'integrate_depth_rate_hz':   10.0,
