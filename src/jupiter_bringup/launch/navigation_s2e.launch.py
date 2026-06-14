@@ -40,11 +40,20 @@ def generate_launch_description():
     default_map = os.path.expanduser('~/jupitercpp_ws/maps/apartment_s2e_v2.yaml')
 
     map_arg = LaunchConfiguration('map')
+    color_w = LaunchConfiguration('color_width')
+    color_h = LaunchConfiguration('color_height')
 
     return LaunchDescription([
 
         DeclareLaunchArgument('map', default_value=default_map,
             description='Static map yaml for map_server (default apartment_s2e_v2.yaml).'),
+        # Color resolution is overridable so the full stack can run the camera at 1280x720 for the
+        # AprilTag docking detector while nvblox still uses depth@640. Default 640x480 keeps standalone
+        # nav unchanged.
+        DeclareLaunchArgument('color_width',  default_value='640',
+            description='Orbbec color width  (set 1280 in the full stack for AprilTag docking).'),
+        DeclareLaunchArgument('color_height', default_value='480',
+            description='Orbbec color height (set 720 to pair with color_width 1280).'),
 
         # ── Sensors / odometry ────────────────────────────────────────────────
         # micro-ROS agent — ESP32: /odom/unfiltered + receives /cmd_vel for the motors
@@ -87,7 +96,7 @@ def generate_launch_description():
                 'launch', 'gemini_330_series.launch.py')),
             launch_arguments={
                 'serial_number': 'CP9KB53000HP', 'usb_port': '',
-                'enable_color': 'true', 'color_width': '640', 'color_height': '480',
+                'enable_color': 'true', 'color_width': color_w, 'color_height': color_h,
                 'color_fps': '15', 'color_format': 'MJPG',
                 'enable_depth': 'true', 'depth_width': '640', 'depth_height': '480',
                 'depth_fps': '15', 'enable_point_cloud': 'true', 'enable_laser': 'true',

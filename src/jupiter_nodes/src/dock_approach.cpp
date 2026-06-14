@@ -37,6 +37,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <std_srvs/srv/set_bool.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -89,6 +90,16 @@ public:
         res->success = true;
         res->message = engaged_ ? "docking engaged" : "docking stopped";
         RCLCPP_INFO(get_logger(), "%s", res->message.c_str());
+      });
+
+    // Topic trigger (mirrors the service) so the brain can engage docking from a voice command.
+    engage_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "/dock/engage", 10,
+      [this](std_msgs::msg::Bool::SharedPtr msg) {
+        engaged_ = msg->data;
+        if (engaged_) { last_rho_ = 1e9; }
+        else { publish_zero(); }
+        RCLCPP_INFO(get_logger(), "%s (via /dock/engage)", engaged_ ? "docking engaged" : "docking stopped");
       });
 
     timer_ = create_wall_timer(
@@ -199,6 +210,7 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr marker_sub_;
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr engage_srv_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr engage_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

@@ -101,6 +101,19 @@ bool is_sleep_phrase(const std::string& text) {
     return false;
 }
 
+bool is_dock_phrase(const std::string& text) {
+    std::string lower = text;
+    for (char& c : lower) c = static_cast<char>(std::tolower(c));
+    static const std::vector<std::string> kPhrases = {
+        "go to the dock", "go to dock", "go to your dock", "go and dock",
+        "dock yourself", "go charge", "go and charge", "return to dock"
+    };
+    for (const auto& p : kPhrases) {
+        if (lower.find(p) != std::string::npos) return true;
+    }
+    return false;
+}
+
 bool is_wake_phrase(const std::string& text) {
     std::string lower = text;
     for (char& c : lower) c = static_cast<char>(std::tolower(c));
@@ -213,6 +226,7 @@ public:
         register_pub_  = create_publisher<std_msgs::msg::String>("/vision/register", 10);
         trigger_pub_   = create_publisher<std_msgs::msg::String>("/vision/trigger", 10);
         sleep_pub_     = create_publisher<std_msgs::msg::Bool>("/jupiter/sleeping", 10);
+        dock_pub_      = create_publisher<std_msgs::msg::Bool>("/dock/engage", 10);
         // Tells the voice node to relax its 2-word minimum filter so a single-word
         // name (e.g. "Logan") is accepted during guest registration.
         expecting_name_pub_ = create_publisher<std_msgs::msg::Bool>("/jupiter/expecting_name", 10);
@@ -417,6 +431,15 @@ private:
             publish_sleep_state(true);
             RCLCPP_INFO(get_logger(), "Sleep phrase detected — entering sleep mode");
             speak("Goodnight. Say wake up or hey Jupiter when you need me.");
+            return;
+        }
+
+        if (is_dock_phrase(user_text)) {
+            std_msgs::msg::Bool dock_msg;
+            dock_msg.data = true;
+            dock_pub_->publish(dock_msg);
+            RCLCPP_INFO(get_logger(), "Dock phrase detected — engaging docking");
+            speak("Heading to the dock.");
             return;
         }
 
@@ -839,6 +862,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    register_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    trigger_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr      sleep_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr      dock_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr      expecting_name_pub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr text_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr user_sub_;
