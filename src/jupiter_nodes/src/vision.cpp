@@ -122,8 +122,13 @@ private:
         this->declare_parameter("camera_topic",   "/camera/color/image_raw");
         this->declare_parameter("image_width",    1280);
         this->declare_parameter("image_height",   720);
-        this->declare_parameter("marker_size_m",  0.127);
+        this->declare_parameter("marker_size_m",  0.149);  // measured black-border edge of the A4 tag36h11 prints
         this->declare_parameter("docking_tag_id", 1);
+        // Frame the marker pose is published in. solvePnP returns the pose in the camera OPTICAL
+        // convention (z forward, x right, y down), so this MUST be an optical frame — NOT camera_link
+        // (body frame: x forward, z up) or every downstream TF transform mis-orients it (opennav_docking
+        // would read the tag as "up" instead of "forward"). The Orbbec driver publishes this frame.
+        this->declare_parameter("marker_frame_id", std::string("camera_color_optical_frame"));
         this->declare_parameter("snapshot_path",  std::string("/tmp/jupiter_view.jpg"));
         this->declare_parameter("show_preview",   false);
         // Orbbec Gemini 336 factory calibration defaults
@@ -177,6 +182,7 @@ private:
         docking_tag_id_ = this->get_parameter("docking_tag_id").as_int();
         show_preview_   = this->get_parameter("show_preview").as_bool();
         snapshot_path_  = this->get_parameter("snapshot_path").as_string();
+        marker_frame_id_ = this->get_parameter("marker_frame_id").as_string();
     }
 
     void trigger_callback(const std_msgs::msg::String::SharedPtr msg) {
@@ -274,7 +280,7 @@ private:
 
         auto pose_msg = geometry_msgs::msg::PoseStamped();
         pose_msg.header.stamp    = stamp;
-        pose_msg.header.frame_id = "camera_link";
+        pose_msg.header.frame_id = marker_frame_id_;
         pose_msg.pose.position.x = tvec.at<double>(0);
         pose_msg.pose.position.y = tvec.at<double>(1);
         pose_msg.pose.position.z = tvec.at<double>(2);
@@ -295,6 +301,7 @@ private:
     int         docking_tag_id_{1};
     bool        show_preview_{false};
     std::string snapshot_path_;
+    std::string marker_frame_id_;
 
     std::mutex frame_mutex_;
     cv::Mat    latest_frame_;

@@ -25,6 +25,9 @@ find_package(vpi REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(CURL REQUIRED)
 find_package(nlohmann_json REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 # whisper.cpp paths (standalone build in workspace root)
 set(WHISPER_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../whisper.cpp/include")
@@ -45,11 +48,20 @@ add_executable(jupiter_voice src/voice.cpp)
 add_executable(jupiter_brain src/brain.cpp)
 add_executable(jupiter_face_recognition src/face_recognition.cpp)
 add_executable(scan_deskew_node src/scan_deskew_node.cpp)
+add_executable(dock_approach src/dock_approach.cpp)
 # Link ROS2 dependencies
 ament_target_dependencies(scan_deskew_node
   rclcpp
   sensor_msgs
   nav_msgs
+)
+
+ament_target_dependencies(dock_approach
+  rclcpp
+  geometry_msgs
+  tf2_ros
+  tf2_geometry_msgs
+  std_srvs
 )
 
 ament_target_dependencies(jupiter_vision
@@ -132,6 +144,7 @@ install(TARGETS
   jupiter_brain
   jupiter_face_recognition
   scan_deskew_node
+  dock_approach
   DESTINATION lib/${PROJECT_NAME}
 )
 
