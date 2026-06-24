@@ -13,9 +13,11 @@
 #   ros2 service call /dock_engage std_srvs/srv/SetBool "{data: false}"   # stop anytime
 
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, ExecuteProcess
+from launch.actions import IncludeLaunchDescription, ExecuteProcess, DeclareLaunchArgument
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -23,8 +25,14 @@ import os
 def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
     ekf_config  = os.path.join(bringup_dir, 'config', 'ekf_odom.yaml')
+    target_distance = LaunchConfiguration('target_distance')
 
     return LaunchDescription([
+
+        # base_footprint -> tag stop distance. 0.28 drives ~120mm closer than the old 0.40 standoff, to
+        # seat the dock pogo pins. Fine-tune contact depth at launch, e.g. target_distance:=0.26 (firmer)
+        # or 0.30 (lighter).
+        DeclareLaunchArgument('target_distance', default_value='0.28'),
 
         # ESP32: receives /cmd_vel, publishes /odom/unfiltered
         ExecuteProcess(
@@ -41,10 +49,11 @@ def generate_launch_description():
         Node(package='robot_localization', executable='ekf_node', name='ekf_node',
              output='screen', parameters=[ekf_config]),
 
-        # Camera mount TF (Orbbec driver adds camera_link -> camera_color_optical_frame)
+        # Camera mount TF (Orbbec driver adds camera_link -> camera_color_optical_frame).
+        # Pitch -0.0995 rad = 5.7deg nose-UP (negative per REP-103): camera tilted up for face-rec.
         Node(package='tf2_ros', executable='static_transform_publisher', name='base_to_camera_link',
              arguments=['--x', '0.100', '--y', '0.000', '--z', '0.475',
-                        '--roll', '0', '--pitch', '0', '--yaw', '0',
+                        '--roll', '0', '--pitch', '-0.0995', '--yaw', '0',
                         '--frame-id', 'base_footprint', '--child-frame-id', 'camera_link']),
 
         # Orbbec 336 — COLOR ONLY @1280x720 (matches the vision node calibration)
@@ -77,7 +86,7 @@ def generate_launch_description():
         Node(package='jupiter_nodes', executable='dock_approach', name='dock_approach',
              output='screen',
              parameters=[{
-                 'target_distance':   0.40,
+                 'target_distance':   ParameterValue(target_distance, value_type=float),
                  'base_frame':        'base_footprint',
                  'max_linear':        0.12,
                  'max_angular':       0.5,

@@ -750,6 +750,26 @@ private:
             return false;
         };
 
+        // ── Universal cancel — bail out of registration from ANY step and stay as Guest ──
+        // "no" is intentionally NOT here (at confirmation it means "wrong name, re-ask"); these are
+        // the explicit escape hatches so the user is never trapped in the YES/NO loop.
+        if (contains_word("cancel") || contains_word("stop") || contains_word("skip") ||
+            contains_word("guest") ||
+            lower.find("never mind") != std::string::npos ||
+            lower.find("nevermind")  != std::string::npos ||
+            lower.find("forget it")  != std::string::npos ||
+            lower.find("leave it")   != std::string::npos ||
+            lower.find("don't register")  != std::string::npos ||
+            lower.find("do not register") != std::string::npos ||
+            lower.find("not interested")  != std::string::npos) {
+            pending_registration_name_.clear();
+            reg_state_ = RegState::None;
+            set_expecting_name(false);
+            current_user_ = "Guest";   // stops greet_user from immediately re-offering registration
+            speak("Okay, cancelling that. I will continue as Guest. How can I help?");
+            return;
+        }
+
         // ── Awaiting the name ────────────────────────────────────────────────
         if (reg_state_ == RegState::AwaitingName) {
             // User declines to register

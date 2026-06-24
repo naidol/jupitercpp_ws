@@ -201,18 +201,30 @@ Visualization Manager:
         Value: /particle_cloud
       Value: true
 
-    - Class: rviz_default_plugins/Image
+    - Alpha: 1
+      Class: rviz_default_plugins/Polygon
+      Color: 0; 255; 255
       Enabled: true
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: Camera
+      Name: Global Footprint
       Topic:
-        Depth: 5
+        Depth: 1
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /camera/color/image_raw/compressed
+        Value: /global_costmap/published_footprint
+      Value: true
+
+    - Alpha: 1
+      Class: rviz_default_plugins/Polygon
+      Color: 255; 0; 255
+      Enabled: true
+      Name: Local Footprint
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /local_costmap/published_footprint
       Value: true
 
   Enabled: true

@@ -65,21 +65,19 @@ controller_server:
       approach_velocity_scaling_dist: 0.6
       # Lookahead "carrot" -- keep short so it squares up before a doorway instead of clipping the frame.
       use_velocity_scaled_lookahead_dist: true
-      lookahead_dist: 0.50
-      min_lookahead_dist: 0.40                # 2026-06-12: 0.30->0.40
-      max_lookahead_dist: 0.90                # 2026-06-12: 0.60->0.90
-      lookahead_time: 2.0                      # 2026-06-12: 1.5->2.0. Effective carrot = vel*time = 0.30*2.0 = 0.60m
-                                               # (was 0.45m). A LONGER carrot averages out SmacPlanner2D path wiggle so
-                                               # the heading-to-carrot error stays small/steady -> RPP TRACKS instead of
-                                               # toggling across the rotate-to-heading threshold (the left/right "dance").
+      lookahead_dist: 0.80
+      min_lookahead_dist: 0.70                # 2026-06-20: 0.40->0.70. Floor: SmacPlanner2D MOORE-8 grid paths have
+      max_lookahead_dist: 1.50                # diagonal jags every ~0.05m (grid res). A 0.40m min carrot chases each
+      lookahead_time: 2.5                     # one -> wavy drive on clear straight floor. 0.70m averages out ~14 jags
+                                              # at a time -> RPP sees a smooth direction, not individual lattice kinks.
       # Pivot-in-place to face the path before driving (mecanum zero-radius turn; the behaviour you want).
       use_rotate_to_heading: true
-      rotate_to_heading_min_angle: 1.0         # 2026-06-12: 0.785->1.0 (~57deg). Only PIVOT for genuinely large heading
-                                               # errors (e.g. squaring up to a doorway), NOT minor path wiggle. Stops the
-                                               # in-place spin from re-triggering every cycle and swinging the footprint
-                                               # into the inflated passage walls (which caused the "collision ahead" spam).
-      rotate_to_heading_angular_vel: 1.0
-      max_angular_accel: 3.2
+      rotate_to_heading_min_angle: 1.4         # 2026-06-20: 1.0->1.4 (~80deg). Trigger hard-pivot ONLY for very large
+                                               # heading errors (doorway square-up, U-turns) — NOT the mild curves that
+                                               # appear near inflated obstacles. Stops the over-rotate/correct oscillation
+                                               # that caused wavy trajectories in the lounge.
+      rotate_to_heading_angular_vel: 0.5       # 2026-06-20: 1.0->0.5. Slow the pivot so it doesn't overshoot and hunt.
+      max_angular_accel: 1.6                   # 2026-06-20: 3.2->1.6. Gentler ramp-up prevents snap over-rotation.
       allow_reversing: false                 # rotate-to-heading handles turns (mutually exclusive with reversing)
       # Regulated velocity: auto-slow on tight curvature and near obstacle cost (dining/kitchen clutter).
       use_regulated_linear_velocity_scaling: true
@@ -109,11 +107,11 @@ local_costmap:
       resolution: 0.05
       transform_tolerance: 0.5
       footprint: "[[-0.175, -0.20], [0.175, -0.20], [0.175, 0.20], [-0.175, 0.20]]"
-      plugins: ["obstacle_layer", "nvblox_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "inflation_layer"]   # 2026-06-20: nvblox RETIRED -> LD20 low lidar (scan_low) is now the low-obstacle source
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: scan
+        observation_sources: scan scan_low
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -124,12 +122,28 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 7.5
           obstacle_min_range: 0.0
+        # scan_low — LD20 lidar at ~0.13 m. Catches LOW furniture (chair legs, feet, kick-boards)
+        # the S2E at 0.515 m is blind to; replaces nvblox without the camera/GPU cost. The robot's own
+        # 4 corner uprights + low clutter all return < 0.20 m, so BOTH min ranges are 0.30 m: anything
+        # closer is ignored for marking AND clearing (no phantom self-obstacle, no false-clearing past
+        # a blocked beam). 2026-06-20.
+        scan_low:
+          topic: /scan_low
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 3.5
+          raytrace_min_range: 0.30
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.30
         decay_time: 5.0
-      # nvblox_layer — Orbbec depth -> GPU ESDF slice. Catches LOW furniture (chairs, table
-      # legs, feet) that the S2E lidar at 0.515 m is blind to. 2026-06-10.
+      # nvblox_layer RETIRED 2026-06-20: camera tilted 5.7deg nose-UP for face-rec -> depth grazes the
+      # floor at the FOV bottom edge -> unreliable ESDF. The LD20 low lidar (scan_low, above) now owns
+      # the low-obstacle job. Block kept (enabled:false, off the plugins list) for quick re-enable.
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
-        enabled: true    # re-enabled 2026-06-10 after shrinking nvblox map_clearing_radius 5.0->2.5 to stop phantom accumulation
+        enabled: false
         nvblox_map_slice_topic: "/nvblox_node/static_map_slice"
         max_obstacle_distance: 1.0
         inflation_distance: 0.0
@@ -163,14 +177,14 @@ global_costmap:
       # static_layer stamps the pre-built apartment map into the GLOBAL costmap so the
       # planner routes around real walls (it was missing — planner saw only live lidar +
       # unknown space and cut diagonals straight through walls/furniture). 2026-06-09.
-      plugins: ["static_layer", "obstacle_layer", "nvblox_layer", "inflation_layer"]   # 2026-06-12: nvblox RE-ADDED to global -- lab clutter is below the lidar; Smac needs it to route around real low furniture
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]   # 2026-06-20: nvblox RETIRED from global too -> LD20 scan_low gives Smac the low furniture to route around
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: scan
+        observation_sources: scan scan_low
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -181,14 +195,25 @@ global_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 7.5
           obstacle_min_range: 0.0
+        # scan_low — LD20 at ~0.13 m gives Smac the LOW furniture (chair legs, feet) to route AROUND,
+        # the role nvblox held in the global costmap. Same 0.30 m min ranges to mask the robot's own
+        # uprights/clutter. 2026-06-20.
+        scan_low:
+          topic: /scan_low
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 3.5
+          raytrace_min_range: 0.30
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.30
         decay_time: 10.0
-      # nvblox_layer RE-ADDED to GLOBAL 2026-06-12: the lab clutter is LOW (below the 0.515m lidar), so the
-      # lidar-only global costmap was BLIND to it -> Smac planned the robot STRAIGHT INTO real furniture (only the
-      # LOCAL costmap saw it, where RPP then collision-stopped + trapped). With nvblox in the GLOBAL costmap, Smac
-      # sees the low clutter and routes AROUND it through the real free space. Marks are REAL (Logan confirmed).
+      # nvblox_layer RETIRED from GLOBAL 2026-06-20 (see local costmap note): tilted camera depth is
+      # unreliable; LD20 scan_low now feeds the low furniture to Smac. Kept off the plugins list.
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
-        enabled: true
+        enabled: false
         nvblox_map_slice_topic: "/nvblox_node/static_map_slice"
         max_obstacle_distance: 1.0
         inflation_distance: 0.0
@@ -230,8 +255,8 @@ planner_server:
       use_final_approach_orientation: false
       smoother:
         max_iterations: 1000
-        w_smooth: 0.3
-        w_data: 0.2
+        w_smooth: 0.6       # 2026-06-20: 0.3->0.6. Aggressive smoothing of the A* lattice path before RPP sees it.
+        w_data: 0.1         # 2026-06-20: 0.2->0.1. Allow path to deviate from lattice nodes to become genuinely smooth.
         tolerance: 1.0e-10
 
 smoother_server:

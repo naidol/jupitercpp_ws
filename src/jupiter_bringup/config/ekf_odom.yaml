@@ -39,16 +39,35 @@ ekf_node:
                    false, false, true,
                    false, false, false]
     
-    # Corrected Orbbec Gemini 336 Internal IMU
+    # BNO055 IMU (corrected covariance). Fusing absolute yaw orientation + yaw rate.
+    # 2026-06-20: enabled absolute yaw fusion (row 2 pos 5 = true). The BNO055 NDOF mode gives
+    # magnetometer-based absolute yaw that is stable and calibration-persisting. Without this,
+    # the EKF has no yaw anchor — it integrates rate only and wobbles between AMCL corrections,
+    # causing RPP to see a drifting heading and produce a wavy straight drive.
+    # IF magnetometer is corrupted by motors (test: watch /imu/data yaw while motors spin with
+    # robot blocked) -> revert this line to 'false, false, false' and rely on Fix 1 alone.
     imu0: /imu/data/corrected
     imu0_config: [false, false, false,
-                  false, false, false, # Ignore Orientation (6-axis only)
+                  false, false, true,  # fuse absolute yaw from BNO055 magnetometer
                   false, false, false,
-                  false, false, true,
-                  false, false, false] # DO NOT fuse linear acceleration
+                  false, false, true,  # also fuse yaw rate
+                  false, false, false]
     imu0_differential: false
-    imu0_relative:     true
+    imu0_relative:     false           # absolute orientation -> relative must be false
     imu0_remove_gravitational_acceleration: true
+
+    # Orbbec Gemini 336 internal gyro — 197Hz yaw rate only.
+    # Bridges the 6Hz BNO055 gaps: EKF gets a heading rate update every 5ms instead of 167ms.
+    # No absolute orientation (6-axis only, no magnetometer) — BNO055 remains the yaw anchor.
+    imu1: /camera/gyro/sample
+    imu1_config: [false, false, false,
+                  false, false, false,  # no orientation
+                  false, false, false,
+                  false, false, true,   # yaw rate only
+                  false, false, false]
+    imu1_differential: false
+    imu1_relative:     true            # 6-axis only — no absolute reference, treat as relative
+    imu1_remove_gravitational_acceleration: true
 
     odom0_differential: false
     odom0_relative:     true
@@ -60,18 +79,24 @@ ekf_node:
 
     # Process noise — tuned for 0.3 m/s mecanum drive on hard floor
     # All values must be floats (ROS2 param parser requires uniform sequence types)
+    # 2026-06-20: yaw [5,5] 0.06->0.01, vyaw [11,11] 0.02->0.005.
+    # Rationale: no absolute yaw reference in EKF (orientation fusion off); heading is
+    # pure integration of wheel-odom + IMU yaw-rate. High process noise lets the yaw state
+    # drift freely between AMCL corrections -> RPP sees a wobbling heading -> wavy straight
+    # drives. Lower noise tells the EKF to TRUST its integrated heading more; AMCL still
+    # corrects global drift via map->odom TF, but the EKF yaw is now stable between updates.
     process_noise_covariance: [0.05,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
                                0.0,   0.05,  0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
                                0.0,   0.0,   0.06,  0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
                                0.0,   0.0,   0.0,   0.03,  0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
                                0.0,   0.0,   0.0,   0.0,   0.03,  0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
-                               0.0,   0.0,   0.0,   0.0,   0.0,   0.06,  0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
                                0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.025,  0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
                                0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.025,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
                                0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.04,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
                                0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.01,  0.0,   0.0,   0.0,   0.0,   0.0,
                                0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.01,  0.0,   0.0,   0.0,   0.0,
-                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.02,  0.0,   0.0,   0.0,
+                               0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.005, 0.0,   0.0,   0.0,
                                0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.01,  0.0,   0.0,
                                0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,
                                0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.015]

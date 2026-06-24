@@ -1,20 +1,22 @@
 # Copyright 2026 Logan Naidoo <naidoo.logan@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 #
-# Autonomous navigation: RPLIDAR S2E + Orbbec 336 (nvblox) + static map + AMCL (no cuVSLAM, no LD20).
+# Autonomous navigation: RPLIDAR S2E (high) + LD20 (low) dual-lidar + static map + AMCL (no cuVSLAM).
 #
 # Localisation:  AMCL              — scan-matches S2E /scan vs the static map -> map->odom TF
 # Static map:    map_server        — the pre-built apartment occupancy grid
 # Odometry:      ESP32 + EKF       — odom->base_footprint (wheel + BNO055 yaw)
-# Obstacles 2D:  S2E /scan         — Nav2 ObstacleLayer (local + global costmaps), 360 deg @ 0.515m
-# Obstacles 3D:  Orbbec depth      — nvblox GPU ESDF -> NvbloxCostmapLayer; catches LOW furniture
-#                                    (chairs, table legs, feet) the lidar at 0.515m is blind to
+# Obstacles hi:  S2E /scan         — Nav2 ObstacleLayer (local + global), 360 deg @ 0.515m
+# Obstacles lo:  LD20 /scan_low    — Nav2 ObstacleLayer 2nd source @ ~0.13m; catches LOW furniture
+#                                    (chair legs, feet, kick-boards) the S2E plane is blind to.
+#                                    REPLACES nvblox (camera now tilted up for face-rec -> bad depth).
+# Camera:        Orbbec COLOR ONLY — freed for face-rec + AprilTag docking (full stack); no depth.
 # Navigation:    Nav2 MPPI (DiffDrive — vx+wz, no strafe; strafe kept only for docking)
 #
-# Camera mount static TF base_footprint->camera_link = 0.100, 0.000, 0.475 (measured 2026-06-10;
-#   ~1.3deg nose-down pitch known + DEFERRED as minor). nvblox needs map->base_footprint (AMCL+EKF).
+# Camera mount static TF base_footprint->camera_link = 0.100, 0.000, 0.475, pitch -0.0995 (5.7deg up).
 #
-# TF chain: map->odom (AMCL) -> odom->base_footprint (EKF) -> base_footprint->{base_laser, camera_link}.
+# TF chain: map->odom (AMCL) -> odom->base_footprint (EKF)
+#           -> base_footprint->{base_laser, ld20_laser, camera_link, imu_link}.
 #
 # Usage:
 #   ros2 launch jupiter_bringup navigation_s2e.launch.py            # uses maps/apartment_s2e_v2.yaml
@@ -80,6 +82,30 @@ def generate_launch_description():
             name='base_link_to_base_laser',
             arguments=['0.035', '0.0', '0.515', '3.14159265', '0', '0', 'base_footprint', 'base_laser'],
         ),
+
+        # LD20 LOW lidar (LD19 profile) — /scan_low in frame ld20_laser, ~0.13 m above ground.
+        # Second obstacle source for the costmap: catches LOW furniture (chair legs, feet) under the
+        # S2E's 0.515 m plane. Orientation verified in RViz (yaw 0). The costmap masks its own near
+        # structure via 0.30 m min ranges, so no angular crop is needed here. Replaces nvblox.
+        Node(
+            package='ldlidar_stl_ros2', executable='ldlidar_stl_ros2_node', name='LD19_low',
+            output='screen',
+            parameters=[
+                {'product_name':           'LDLiDAR_LD19'},
+                {'topic_name':             'scan_low'},
+                {'frame_id':               'ld20_laser'},
+                {'port_name':              '/dev/jupiter_lidar'},
+                {'port_baudrate':          230400},
+                {'laser_scan_dir':         True},
+                {'enable_angle_crop_func': False},
+            ],
+        ),
+        # Static TF base_footprint -> ld20_laser: 6 cm forward, centred, 13 cm up, yaw 0.
+        Node(
+            package='tf2_ros', executable='static_transform_publisher',
+            name='base_to_ld20_laser',
+            arguments=['0.06', '0', '0.13', '0', '0', '0', 'base_footprint', 'ld20_laser'],
+        ),
         # Static TF base_footprint -> imu_link (BNO055)
         Node(
             package='tf2_ros', executable='static_transform_publisher',
@@ -87,9 +113,10 @@ def generate_launch_description():
             arguments=['0', '0', '0.05', '0', '0', '0', 'base_footprint', 'imu_link'],
         ),
 
-        # ── Orbbec 336 camera (DEPTH-ON for nvblox) ───────────────────────────
-        # Depth + point cloud + laser projector ON — the OPPOSITE of the cuVSLAM-era
-        # camera.launch.py (which has them off). IR streams off (nvblox uses depth only).
+        # ── Orbbec 336 camera (COLOR ONLY — nvblox retired 2026-06-20) ─────────
+        # Depth/point-cloud/laser OFF: the LD20 low lidar now owns low-obstacle sensing, so the camera
+        # is freed for face-rec + AprilTag docking (color stream, consumed by the full-stack vision
+        # nodes). Dropping depth also reclaims USB bandwidth on the shared xHCI controller + GPU.
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 get_package_share_directory('orbbec_camera'),
@@ -98,18 +125,19 @@ def generate_launch_description():
                 'serial_number': 'CP9KB53000HP', 'usb_port': '',
                 'enable_color': 'true', 'color_width': color_w, 'color_height': color_h,
                 'color_fps': '15', 'color_format': 'MJPG',
-                'enable_depth': 'true', 'depth_width': '640', 'depth_height': '480',
-                'depth_fps': '15', 'enable_point_cloud': 'true', 'enable_laser': 'true',
+                'enable_depth': 'false', 'enable_point_cloud': 'false', 'enable_laser': 'false',
                 'enable_left_ir': 'false', 'enable_right_ir': 'false',
+                'enable_gyro': 'true', 'enable_accel': 'true',  # IMU for EKF imu1 high-rate yaw
             }.items(),
         ),
         # Static TF base_footprint -> camera_link (measured 2026-06-10: 0.100/0/0.475).
-        # ~1.3deg nose-down pitch known + deferred as minor; add a --pitch term here when fixed.
+        # Pitch -0.0995 rad = 5.7deg nose-UP (negative = up per REP-103): camera was physically tilted
+        # up so face-rec can see a standing user. This supersedes the old deferred ~1.3deg nose-down.
         Node(
             package='tf2_ros', executable='static_transform_publisher',
             name='base_to_camera_link',
             arguments=['--x', '0.100', '--y', '0.000', '--z', '0.475',
-                       '--roll', '0', '--pitch', '0', '--yaw', '0',
+                       '--roll', '0', '--pitch', '-0.0995', '--yaw', '0',
                        '--frame-id', 'base_footprint', '--child-frame-id', 'camera_link'],
         ),
 
@@ -170,14 +198,7 @@ def generate_launch_description():
                                             'velocity_smoother']}],
             ),
         ]),
-
-        # ── nvblox (Orbbec depth -> ESDF slice for NvbloxCostmapLayer) ─────────
-        # Delayed 8s: needs the full map->odom->base_footprint TF (AMCL + EKF) to place the
-        # reconstruction, plus the camera depth stream flowing. Reuses nvblox.launch.py so the
-        # nvblox config lives in exactly one place.
-        TimerAction(period=8.0, actions=[
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(os.path.join(
-                    bringup_dir, 'launch', 'nvblox.launch.py'))),
-        ]),
+        # nvblox RETIRED 2026-06-20: low-obstacle sensing moved to the LD20 (scan_low, above) because the
+        # camera is now tilted 5.7deg nose-UP for face-rec, which makes its floor-grazing depth unreliable.
+        # Re-enable by restoring this TimerAction + nvblox_layer in nav2_params + depth in the camera block.
     ])
