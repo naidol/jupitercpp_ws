@@ -32,7 +32,7 @@ def generate_launch_description():
         # base_footprint -> tag stop distance. 0.28 drives ~120mm closer than the old 0.40 standoff, to
         # seat the dock pogo pins. Fine-tune contact depth at launch, e.g. target_distance:=0.26 (firmer)
         # or 0.30 (lighter).
-        DeclareLaunchArgument('target_distance', default_value='0.28'),
+        DeclareLaunchArgument('target_distance', default_value='0.22'),
 
         # ESP32: receives /cmd_vel, publishes /odom/unfiltered
         ExecuteProcess(
