@@ -35,7 +35,7 @@ namespace {
 double clamp(double v, double lo, double hi) { return std::max(lo, std::min(hi, v)); }
 }
 
-enum class DockPhase { ALIGN, DRIVE_IN };
+enum class DockPhase { ALIGN, SETTLE, DRIVE_IN };
 
 class DockApproach : public rclcpp::Node {
 public:
@@ -47,8 +47,9 @@ public:
     max_linear_           = declare_parameter("max_linear",           0.10);   // m/s — constant forward speed
     max_angular_drivein_  = declare_parameter("max_angular_drivein",  0.20);   // rad/s cap during drive-in
     k_ang_                = declare_parameter("k_ang",                4.0);    // ALIGN gain — high to overcome stiction at small bearings
-    k_ang_drivein_        = declare_parameter("k_ang_drivein",        1.5);    // DRIVE-IN gain — lower to prevent oscillation (wheels already moving)
+    k_ang_drivein_        = declare_parameter("k_ang_drivein",        0.8);    // DRIVE-IN gain — low to prevent pursuit instability at large initial offsets
     blind_zone_tx_        = declare_parameter("blind_zone_tx",         0.45);   // m — inside this distance, stop angular corrections; guide rails take over
+    settle_distance_      = declare_parameter("settle_distance",        0.25);  // m to drive straight after ALIGN so caster self-aligns before corrections begin
     bearing_deadband_     = declare_parameter("bearing_deadband",      0.052);  // rad (3 deg) — ignore solvePnP noise below this
     bearing_smooth_n_     = declare_parameter("bearing_smooth_n",      3);      // moving-average window for bearing
     detection_timeout_    = declare_parameter("detection_timeout",    0.5);    // s
@@ -70,16 +71,18 @@ public:
     auto on_engage = [this](bool engage) {
       engaged_ = engage;
       if (engaged_) {
-        phase_        = DockPhase::DRIVE_IN;   // skip ALIGN: pivot-in-place displaces rear swivel caster
+        phase_        = DockPhase::ALIGN;   // ALIGN first if bearing is large; exits to DRIVE-IN once within threshold
         last_tx_      = 1e9;
         last_ty_      = 0.0;
         stuck_tx_ref_ = 1e9;
         stuck_since_  = this->now();
         bearing_buf_.fill(0.0);
-        bearing_idx_   = 0;
-        bearing_count_ = 0;
+        bearing_idx_    = 0;
+        bearing_count_  = 0;
+        first_reading_  = true;
+        settle_tx_start_ = 1e9;
       } else { publish_zero(); }
-      RCLCPP_INFO(get_logger(), "%s", engaged_ ? "docking engaged — DRIVE-IN (no ALIGN)" : "docking stopped");
+      RCLCPP_INFO(get_logger(), "%s", engaged_ ? "docking engaged — ALIGN phase" : "docking stopped");
     };
 
     engage_srv_ = create_service<std_srvs::srv::SetBool>(
@@ -141,11 +144,13 @@ private:
     bearing /= bearing_count_;
 
     // Reject solvePnP normal flips — ty cannot jump >15 cm in one control step.
-    if (std::fabs(ty - last_ty_) > 0.15) {
+    // Skip on first reading: last_ty_ initialises to 0 but robot may genuinely be offset.
+    if (!first_reading_ && std::fabs(ty - last_ty_) > 0.15) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 500,
         "Pose flip rejected: ty %.3f -> %.3f (%.0f cm jump)", last_ty_, ty, std::fabs(ty - last_ty_) * 100.0);
       return;
     }
+    first_reading_ = false;
     last_tx_ = tx;
     last_ty_ = ty;
 
@@ -154,14 +159,32 @@ private:
     // ── Phase 1: ALIGN ─────────────────────────────────────────────────────────
     if (phase_ == DockPhase::ALIGN) {
       if (std::fabs(bearing) < align_exit_threshold_) {
-        phase_ = DockPhase::DRIVE_IN;
-        RCLCPP_INFO(get_logger(), "ALIGN done (bearing %.1f deg, tx=%.2f m) -> DRIVE-IN",
-                    bearing * 180.0 / M_PI, tx);
+        phase_ = DockPhase::SETTLE;
+        settle_tx_start_ = tx;
+        // Reset bearing smoother — ALIGN readings taken while rotating are stale.
+        bearing_buf_.fill(0.0); bearing_idx_ = 0; bearing_count_ = 0;
+        RCLCPP_INFO(get_logger(), "ALIGN done (bearing %.1f deg, tx=%.2f m) -> SETTLE %.2f m",
+                    bearing * 180.0 / M_PI, tx, settle_distance_);
       }
       cmd.angular.z = clamp(k_ang_ * bearing, -max_angular_align_, max_angular_align_);
       cmd_pub_->publish(cmd);
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
         "ALIGN: bearing %.1f deg | wz %.2f", bearing * 180.0 / M_PI, cmd.angular.z);
+      return;
+    }
+
+    // ── Phase 1b: SETTLE ───────────────────────────────────────────────────────
+    // Drive straight (wz=0) for settle_distance_ so the swivel caster self-aligns
+    // after the ALIGN rotation before bearing corrections begin.
+    if (phase_ == DockPhase::SETTLE) {
+      if (settle_tx_start_ - tx >= settle_distance_) {
+        phase_ = DockPhase::DRIVE_IN;
+        RCLCPP_INFO(get_logger(), "SETTLE done (tx=%.2f m) -> DRIVE-IN", tx);
+      }
+      cmd.linear.x = max_linear_ * 0.7;   // moderate speed during settle
+      cmd_pub_->publish(cmd);
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
+        "SETTLE: tx %.2f m (%.2f m remaining)", tx, settle_distance_ - (settle_tx_start_ - tx));
       return;
     }
 
@@ -188,15 +211,18 @@ private:
       return;
     }
 
-    // Forward speed scales down with distance so the robot slows into the dock.
-    // Full speed beyond 0.6m, linearly scaling to 50% at target_distance.
+    // Forward speed scales down with distance AND with bearing magnitude.
+    // Large bearing = robot is angled; slow down so correction converges before travelling far.
     const double slow_start = 0.60;
     double vx = max_linear_;
     if (tx < slow_start) {
       double alpha = (tx - target_distance_) / (slow_start - target_distance_);
       alpha = std::max(0.0, std::min(1.0, alpha));
-      vx = max_linear_ * (0.5 + 0.5 * alpha);   // [50%..100%] of max_linear
+      vx = max_linear_ * (0.5 + 0.5 * alpha);
     }
+    // At 0° bearing: full vx. At >=20° bearing: 40% vx. Linear in between.
+    const double bearing_scale = 1.0 - 0.6 * std::min(1.0, std::fabs(bearing) / 0.349);  // 0.349 rad = 20 deg
+    vx *= bearing_scale;
     cmd.linear.x = vx;
 
     // Inside blind_zone or within dead-band: no angular correction.
@@ -216,7 +242,7 @@ private:
   // params
   double target_distance_, position_tol_, align_exit_threshold_;
   double max_angular_align_, max_linear_, max_angular_drivein_, k_ang_drivein_, blind_zone_tx_;
-  double k_ang_, detection_timeout_, docked_on_loss_tx_, bearing_deadband_;
+  double k_ang_, detection_timeout_, docked_on_loss_tx_, bearing_deadband_, settle_distance_;
   int bearing_smooth_n_;
   std::string base_frame_;
 
@@ -229,9 +255,11 @@ private:
   double last_tx_{1e9};
   double last_ty_{0.0};
   double stuck_tx_ref_{1e9};
+  double settle_tx_start_{1e9};
   std::array<double, 10> bearing_buf_{};
   int bearing_idx_{0};
   int bearing_count_{0};
+  bool first_reading_{true};
   rclcpp::Time stuck_since_;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
