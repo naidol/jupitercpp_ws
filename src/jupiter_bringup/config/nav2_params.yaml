@@ -1,12 +1,11 @@
 # Copyright 2026 Logan Naidoo <naidoo.logan@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 #
-# Nav2 configuration for Jupiter — 4-wheel mecanum robot
-# Vision-only stack: cuVSLAM localisation + nvblox costmaps (no LiDAR)
+# Nav2 configuration for Jupiter — front-wheel-drive diff-drive robot
+# S2E LiDAR + AMCL localisation + LD20 low obstacle layer (no nvblox)
 #
-# Aligned with NVIDIA Isaac ROS nvblox reference (carter_nav2.yaml, release-4.4)
-# Key differences from reference: Omni motion model, smaller inflation for narrower
-# home corridors, higher transform_tolerance for 6fps RGBD TF updates.
+# Motion model: DifferentialMotionModel (switched from Omni 2026-06-29, rubber wheels + swivel caster)
+# Controller: RegulatedPurePursuitController (RPP) — vx + wz only, no strafe
 
 bt_navigator:
   ros__parameters:
@@ -341,19 +340,18 @@ amcl:
     odom_frame_id: "odom"
     global_frame_id: "map"
     scan_topic: "scan"
-    robot_model_type: "nav2_amcl::OmniMotionModel"   # mecanum / omnidirectional base
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"   # front-wheel-drive diff-drive base
     laser_model_type: "likelihood_field"
     laser_max_range: 18.0
     laser_min_range: 0.15
     max_beams: 120
     min_particles: 500
     max_particles: 3000
-    # omni odom-noise model (alpha1..alpha5)
-    alpha1: 0.2
-    alpha2: 0.2
-    alpha3: 0.2
-    alpha4: 0.2
-    alpha5: 0.2
+    # diff odom-noise model (alpha1..alpha4 — no alpha5, that's omni-only)
+    alpha1: 0.2   # rot noise from rot
+    alpha2: 0.2   # rot noise from trans
+    alpha3: 0.2   # trans noise from trans
+    alpha4: 0.2   # trans noise from rot
     update_min_a: 0.1   # 2026-06-10: was 0.15 — correct heading more often
     update_min_d: 0.05  # 2026-06-10: was 0.2 — AMCL ran open-loop on odometry between 0.2m corrections;
                         # the pose slid off the map during the doorway approach (scan drifted right, robot

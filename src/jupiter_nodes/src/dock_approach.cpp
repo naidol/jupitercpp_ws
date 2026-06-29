@@ -26,8 +26,10 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory>
+#include <numeric>
 
 namespace {
 double clamp(double v, double lo, double hi) { return std::max(lo, std::min(hi, v)); }
@@ -43,8 +45,12 @@ public:
     align_exit_threshold_ = declare_parameter("align_exit_threshold", 0.035);  // rad (2 deg)
     max_angular_align_    = declare_parameter("max_angular_align",    0.50);   // rad/s
     max_linear_           = declare_parameter("max_linear",           0.10);   // m/s — constant forward speed
-    max_angular_drivein_  = declare_parameter("max_angular_drivein",  0.05);   // rad/s — tight cap, bearing-only correction during drive-in
-    k_ang_                = declare_parameter("k_ang",                4.0);    // angular proportional gain — high so small bearings exceed stiction (~0.15 rad/s)
+    max_angular_drivein_  = declare_parameter("max_angular_drivein",  0.20);   // rad/s cap during drive-in
+    k_ang_                = declare_parameter("k_ang",                4.0);    // ALIGN gain — high to overcome stiction at small bearings
+    k_ang_drivein_        = declare_parameter("k_ang_drivein",        1.5);    // DRIVE-IN gain — lower to prevent oscillation (wheels already moving)
+    blind_zone_tx_        = declare_parameter("blind_zone_tx",         0.45);   // m — inside this distance, stop angular corrections; guide rails take over
+    bearing_deadband_     = declare_parameter("bearing_deadband",      0.052);  // rad (3 deg) — ignore solvePnP noise below this
+    bearing_smooth_n_     = declare_parameter("bearing_smooth_n",      3);      // moving-average window for bearing
     detection_timeout_    = declare_parameter("detection_timeout",    0.5);    // s
     docked_on_loss_tx_    = declare_parameter("docked_on_loss_tx",    0.35);   // m — tag lost this close = docked
     base_frame_           = declare_parameter("base_frame",           std::string("base_footprint"));
@@ -64,13 +70,16 @@ public:
     auto on_engage = [this](bool engage) {
       engaged_ = engage;
       if (engaged_) {
-        phase_        = DockPhase::ALIGN;
+        phase_        = DockPhase::DRIVE_IN;   // skip ALIGN: pivot-in-place displaces rear swivel caster
         last_tx_      = 1e9;
         last_ty_      = 0.0;
         stuck_tx_ref_ = 1e9;
         stuck_since_  = this->now();
+        bearing_buf_.fill(0.0);
+        bearing_idx_   = 0;
+        bearing_count_ = 0;
       } else { publish_zero(); }
-      RCLCPP_INFO(get_logger(), "%s", engaged_ ? "docking engaged — ALIGN phase" : "docking stopped");
+      RCLCPP_INFO(get_logger(), "%s", engaged_ ? "docking engaged — DRIVE-IN (no ALIGN)" : "docking stopped");
     };
 
     engage_srv_ = create_service<std_srvs::srv::SetBool>(
@@ -121,7 +130,15 @@ private:
 
     const double tx      = tag_base.pose.position.x;
     const double ty      = tag_base.pose.position.y;
-    const double bearing = std::atan2(ty, tx);
+    const double raw_bearing = std::atan2(ty, tx);
+
+    // Moving average over last N bearings to suppress solvePnP noise.
+    bearing_buf_[bearing_idx_] = raw_bearing;
+    bearing_idx_ = (bearing_idx_ + 1) % bearing_smooth_n_;
+    if (bearing_count_ < bearing_smooth_n_) bearing_count_++;
+    double bearing = 0.0;
+    for (int i = 0; i < bearing_count_; ++i) bearing += bearing_buf_[i];
+    bearing /= bearing_count_;
 
     // Reject solvePnP normal flips — ty cannot jump >15 cm in one control step.
     if (std::fabs(ty - last_ty_) > 0.15) {
@@ -171,12 +188,24 @@ private:
       return;
     }
 
-    // Constant forward + bearing-only correction to keep robot pointed at tag.
-    // No vy: fixed lateral strafe causes rotational coupling on mecanum that compounds bearing error.
-    // When bearing=0, the robot is headed directly at the tag — no lateral correction needed.
-    // Guide fins handle the last few mm of lateral error.
-    cmd.linear.x = max_linear_;
-    cmd.angular.z = clamp(k_ang_ * bearing, -max_angular_drivein_, max_angular_drivein_);
+    // Forward speed scales down with distance so the robot slows into the dock.
+    // Full speed beyond 0.6m, linearly scaling to 50% at target_distance.
+    const double slow_start = 0.60;
+    double vx = max_linear_;
+    if (tx < slow_start) {
+      double alpha = (tx - target_distance_) / (slow_start - target_distance_);
+      alpha = std::max(0.0, std::min(1.0, alpha));
+      vx = max_linear_ * (0.5 + 0.5 * alpha);   // [50%..100%] of max_linear
+    }
+    cmd.linear.x = vx;
+
+    // Inside blind_zone or within dead-band: no angular correction.
+    // solvePnP noise < 3 deg is ignored; guide rails handle close-range alignment.
+    double wz = 0.0;
+    if (tx > blind_zone_tx_ && std::fabs(bearing) > bearing_deadband_) {
+      wz = clamp(k_ang_drivein_ * bearing, -max_angular_drivein_, max_angular_drivein_);
+    }
+    cmd.angular.z = wz;
     cmd_pub_->publish(cmd);
 
     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
@@ -186,8 +215,9 @@ private:
 
   // params
   double target_distance_, position_tol_, align_exit_threshold_;
-  double max_angular_align_, max_linear_, max_angular_drivein_;
-  double k_ang_, detection_timeout_, docked_on_loss_tx_;
+  double max_angular_align_, max_linear_, max_angular_drivein_, k_ang_drivein_, blind_zone_tx_;
+  double k_ang_, detection_timeout_, docked_on_loss_tx_, bearing_deadband_;
+  int bearing_smooth_n_;
   std::string base_frame_;
 
   // state
@@ -199,6 +229,9 @@ private:
   double last_tx_{1e9};
   double last_ty_{0.0};
   double stuck_tx_ref_{1e9};
+  std::array<double, 10> bearing_buf_{};
+  int bearing_idx_{0};
+  int bearing_count_{0};
   rclcpp::Time stuck_since_;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
