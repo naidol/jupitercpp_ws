@@ -89,6 +89,16 @@ sensor_msgs__msg__BatteryState battery_msg;
 rcl_publisher_t dock_ir_publisher;
 std_msgs__msg__UInt8 dock_ir_msg;
 
+// IR dock receiver detection. The beacon sends 38kHz burst PACKETS; the TSOP
+// demodulates each burst into an output pulse. We count those pulses via
+// FALLING-edge interrupts and mark a channel "detected" if it saw edges within
+// IR_DETECT_TIMEOUT_MS (> beacon packet period ~52ms, so it holds between packets).
+#define IR_DETECT_TIMEOUT_MS 80
+volatile uint32_t ir_left_edges  = 0;
+volatile uint32_t ir_right_edges = 0;
+void IRAM_ATTR irLeftISR()  { ir_left_edges++;  }
+void IRAM_ATTR irRightISR() { ir_right_edges++; }
+
 rclc_support_t support;
 rcl_allocator_t allocator;
 rcl_node_t node;
@@ -334,10 +344,16 @@ void timerCallback(rcl_timer_t *timer, int64_t last_call_time)
     // Battery at 1 Hz
     EXECUTE_EVERY_N_MS(1000, publish_battery(););
 
-    // IR dock receivers — bit0=left detected, bit1=right detected
-    // KY-022 OUT is active LOW: LOW pin = beam detected
-    uint8_t ir_left  = (digitalRead(IR_RECV_LEFT)  == LOW) ? IR_DOCK_LEFT  : 0;
-    uint8_t ir_right = (digitalRead(IR_RECV_RIGHT) == LOW) ? IR_DOCK_RIGHT : 0;
+    // IR dock receivers — bit0=left detected, bit1=right detected.
+    // A channel is "detected" if its interrupt saw burst-packet edges recently.
+    static uint32_t prev_left_edges = 0, prev_right_edges = 0;
+    static uint32_t left_seen_ms = 0, right_seen_ms = 0;
+    uint32_t nowm = millis();
+    uint32_t le = ir_left_edges, re = ir_right_edges;
+    if (le != prev_left_edges)  { prev_left_edges  = le; left_seen_ms  = nowm; }
+    if (re != prev_right_edges) { prev_right_edges = re; right_seen_ms = nowm; }
+    uint8_t ir_left  = (le && (nowm - left_seen_ms)  < IR_DETECT_TIMEOUT_MS) ? IR_DOCK_LEFT  : 0;
+    uint8_t ir_right = (re && (nowm - right_seen_ms) < IR_DETECT_TIMEOUT_MS) ? IR_DOCK_RIGHT : 0;
     dock_ir_msg.data = ir_left | ir_right;
     RCSOFTCHECK(rcl_publish(&dock_ir_publisher, &dock_ir_msg, NULL));
 }
@@ -457,9 +473,12 @@ void setup()
     digitalWrite(ESP32_LED, LOW);
     flashLED(5);
 
-    // IR dock receivers — KY-022 OUT is open-drain active LOW; pull-up ensures HIGH when no signal
+    // IR dock receivers — TSOP OUT idles HIGH, pulses LOW per demodulated burst.
+    // Pull-up holds HIGH when idle; FALLING interrupts count the burst-packet pulses.
     pinMode(IR_RECV_LEFT,  INPUT_PULLUP);
     pinMode(IR_RECV_RIGHT, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(IR_RECV_LEFT),  irLeftISR,  FALLING);
+    attachInterrupt(digitalPinToInterrupt(IR_RECV_RIGHT), irRightISR, FALLING);
 
     // Pre-allocate message data arrays once (reused across reconnects)
     encoder_msg.data.size     = 4;
