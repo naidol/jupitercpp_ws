@@ -33,7 +33,7 @@ def generate_launch_description():
         # micro-ROS agent — ESP32: publishes /odom/unfiltered, subscribes /cmd_vel for the motors
         ExecuteProcess(
             cmd=['ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
-                 'serial', '--dev', '/dev/jupiter_esp32', '-b', '115200'],
+                 'serial', '--dev', '/dev/jupiter_esp32', '-b', '921600'],
             output='screen', name='micro_ros_agent',
         ),
 

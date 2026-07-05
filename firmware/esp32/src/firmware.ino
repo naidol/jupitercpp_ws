@@ -430,7 +430,7 @@ void destroy_entities()
 
 void setup()
 {
-    Serial.begin(115200);
+    Serial.begin(921600);  // micro-ROS serial transport — must match agent -b (raised from 115200 to clear UART bandwidth ceiling that capped the loop at ~5.7Hz)
 
     // --- Hardware init (blocking delays are safe here, before micro-ROS) ---
     motor1.setSpeed(0);
