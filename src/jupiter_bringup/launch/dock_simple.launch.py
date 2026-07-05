@@ -77,7 +77,7 @@ def generate_launch_description():
                  'camera_topic':    '/camera/color/image_raw',
                  'image_width':     1280,
                  'image_height':    720,
-                 'marker_size_m':   0.060,
+                 'marker_size_m':   0.100,
                  'docking_tag_id':  1,
                  'marker_frame_id': 'camera_color_optical_frame',
              }]),

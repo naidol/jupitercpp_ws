@@ -29,3 +29,6 @@ archive/
 frames_*.gv
 frames_*.pdf
 jupiter_talk.sh
+
+# rosbags — large capture data, keep out of git
+maps/bags/

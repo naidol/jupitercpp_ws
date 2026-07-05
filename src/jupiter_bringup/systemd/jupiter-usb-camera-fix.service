@@ -1,0 +1,28 @@
+# Copyright 2026 Logan Naidoo <naidoo.logan@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+#
+# Recovers the Orbbec Gemini 336 if the Thor misses it on cold boot (Tegra USB3 quirk).
+# Pairs with scripts/jupiter-usb-camera-fix.sh. See docs/THOR_USB_DMA.md.
+#
+# Install:
+#   sudo cp src/jupiter_bringup/scripts/jupiter-usb-camera-fix.sh /usr/local/bin/
+#   sudo chmod +x /usr/local/bin/jupiter-usb-camera-fix.sh
+#   sudo cp src/jupiter_bringup/systemd/jupiter-usb-camera-fix.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable jupiter-usb-camera-fix.service
+#   sudo reboot      # validate on the next COLD start
+
+[Unit]
+Description=Recover Orbbec Gemini 336 if missed on cold boot (Tegra USB3 enumeration quirk)
+After=basic.target
+# Run before the robot stack so a controller re-bind never disrupts a live session.
+Before=jupiter-microros.service jupiter-lidar.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Settle delay so the USB-C device is electrically ready before we check / re-bind.
+ExecStartPre=/bin/sleep 8
+ExecStart=/usr/local/bin/jupiter-usb-camera-fix.sh
+
+[Install]
+WantedBy=multi-user.target

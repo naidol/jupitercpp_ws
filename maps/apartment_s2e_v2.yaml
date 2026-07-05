@@ -1,0 +1,7 @@
+image: apartment_s2e_v2.pgm
+mode: trinary
+resolution: 0.050
+origin: [-4.767, -5.201, 0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196

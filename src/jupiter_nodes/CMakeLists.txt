@@ -49,6 +49,7 @@ add_executable(jupiter_brain src/brain.cpp)
 add_executable(jupiter_face_recognition src/face_recognition.cpp)
 add_executable(scan_deskew_node src/scan_deskew_node.cpp)
 add_executable(dock_approach src/dock_approach.cpp)
+add_executable(dock_ir src/dock_ir.cpp)
 # Link ROS2 dependencies
 ament_target_dependencies(scan_deskew_node
   rclcpp
@@ -62,6 +63,14 @@ ament_target_dependencies(dock_approach
   std_msgs
   tf2_ros
   tf2_geometry_msgs
+  std_srvs
+)
+
+ament_target_dependencies(dock_ir
+  rclcpp
+  geometry_msgs
+  std_msgs
+  nav_msgs
   std_srvs
 )
 
@@ -146,6 +155,7 @@ install(TARGETS
   jupiter_face_recognition
   scan_deskew_node
   dock_approach
+  dock_ir
   DESTINATION lib/${PROJECT_NAME}
 )
 

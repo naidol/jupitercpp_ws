@@ -122,7 +122,7 @@ private:
         this->declare_parameter("camera_topic",   "/camera/color/image_raw");
         this->declare_parameter("image_width",    1280);
         this->declare_parameter("image_height",   720);
-        this->declare_parameter("marker_size_m",  0.060);  // 60mm tag for close-range docking (stable solvePnP to 0.1m)
+        this->declare_parameter("marker_size_m",  0.100);  // 100mm tag — larger for stable solvePnP at close range
         this->declare_parameter("docking_tag_id", 1);
         // Frame the marker pose is published in. solvePnP returns the pose in the camera OPTICAL
         // convention (z forward, x right, y down), so this MUST be an optical frame — NOT camera_link
