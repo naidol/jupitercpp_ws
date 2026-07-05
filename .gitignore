@@ -32,3 +32,6 @@ jupiter_talk.sh
 
 # rosbags — large capture data, keep out of git
 maps/bags/
+
+# PlatformIO build dirs for in-repo firmware (dock_beacon, esp32)
+firmware/**/.pio/
