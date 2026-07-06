@@ -28,8 +28,9 @@ def generate_launch_description():
 
     reverse        = LaunchConfiguration('reverse')
     steer_sign     = LaunchConfiguration('steer_sign')
-    approach_speed = LaunchConfiguration('approach_speed')
-    steer_wz       = LaunchConfiguration('steer_wz')
+    approach_speed  = LaunchConfiguration('approach_speed')
+    steer_wz        = LaunchConfiguration('steer_wz')
+    rotate_to_align = LaunchConfiguration('rotate_to_align')
 
     return LaunchDescription([
 
@@ -41,6 +42,8 @@ def generate_launch_description():
                               description='m/s drive speed (lower = gentler, less overshoot)'),
         DeclareLaunchArgument('steer_wz', default_value='0.20',
                               description='rad/s correction rate (lower = gentler, less overshoot)'),
+        DeclareLaunchArgument('rotate_to_align', default_value='true',
+                              description='true = stop & rotate-in-place to centre, then drive only on BOTH'),
 
         # ESP32: receives /cmd_vel, publishes /odom/unfiltered + /dock/ir
         ExecuteProcess(
@@ -67,7 +70,8 @@ def generate_launch_description():
                  'stuck_vel_threshold':  0.01,   # m/s — below = physically stopped
                  'stuck_timeout':        3.0,    # s — stopped this long = docked
                  'control_rate':         20.0,   # Hz
-                 'reverse':    ParameterValue(reverse, value_type=bool),
-                 'steer_sign': ParameterValue(steer_sign, value_type=float),
+                 'reverse':         ParameterValue(reverse, value_type=bool),
+                 'steer_sign':      ParameterValue(steer_sign, value_type=float),
+                 'rotate_to_align': ParameterValue(rotate_to_align, value_type=bool),
              }]),
     ])

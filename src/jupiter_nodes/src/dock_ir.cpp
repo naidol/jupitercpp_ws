@@ -60,6 +60,7 @@ public:
     beam_hold_           = declare_parameter("beam_hold",           0.8);   // s — hold last reading (bridge burst gaps) before searching
     search_wz_           = declare_parameter("search_wz",           0.30);  // rad/s — rotate speed while searching
     search_timeout_      = declare_parameter("search_timeout",      3.0);   // s — search this long, then give up
+    rotate_to_align_     = declare_parameter("rotate_to_align",     true);  // true = STOP & rotate-in-place to re-centre, then drive straight only on BOTH; false = drive+steer together
 
     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
 
@@ -161,24 +162,27 @@ private:
     bool driving = false;
 
     if (beam_age <= beam_hold_) {
-      // Beam present (or a brief burst gap) — drive on the last valid reading.
-      driving = true;
+      // Beam present (or a brief burst gap).
       switch (latest_ir_) {
         case IR_LEFT:
-          cmd.linear.x  = drive;
-          cmd.angular.z = steer_sign_ * steer_wz_;
-          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500, "LEFT beam — steer");
+        case IR_RIGHT: {
+          // Off-centre. In rotate_to_align mode: STOP and rotate in place until BOTH
+          // (so we don't burn approach distance while correcting). Else: drive + steer.
+          cmd.angular.z = (latest_ir_ == IR_LEFT ? steer_sign_ : -steer_sign_) * steer_wz_;
+          cmd.linear.x  = rotate_to_align_ ? 0.0 : drive;
+          driving       = !rotate_to_align_;
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500, "IR=%s -> turn %s%s",
+                               (latest_ir_ == IR_LEFT ? "LEFT " : "RIGHT"),
+                               (cmd.angular.z > 0.0 ? "LEFT " : "RIGHT"),
+                               (rotate_to_align_ ? " (rotate in place)" : " + drive"));
           break;
-        case IR_RIGHT:
-          cmd.linear.x  = drive;
-          cmd.angular.z = -steer_sign_ * steer_wz_;
-          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500, "RIGHT beam — steer");
-          break;
+        }
         case IR_BOTH:
         default:
           cmd.linear.x  = drive;
           cmd.angular.z = 0.0;
-          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "BOTH beams — straight");
+          driving       = true;
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "IR=BOTH -> drive straight");
           break;
       }
     } else if (search_enabled_ && beam_age <= beam_hold_ + search_timeout_) {
@@ -218,7 +222,7 @@ private:
   // params
   double approach_speed_, steer_wz_, ir_timeout_, ir_hard_timeout_, beam_lost_timeout_;
   double stuck_vel_threshold_, stuck_timeout_, control_rate_;
-  bool   reverse_{false}, search_enabled_{true};
+  bool   reverse_{false}, search_enabled_{true}, rotate_to_align_{true};
   double steer_sign_{1.0}, beam_hold_{0.8}, search_wz_{0.30}, search_timeout_{3.0};
 
   // state
