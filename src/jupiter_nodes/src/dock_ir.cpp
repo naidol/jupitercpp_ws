@@ -4,13 +4,21 @@
 // dock_ir — IR beacon docking controller.
 //
 // Subscribes to /dock/ir (UInt8 bitmask published by ESP32):
-//   0 = no beam        → stop / lost dock
+//   0 = no beam        → beam lost (rotate-search, then give up)
 //   1 = left beam only → steer left  (robot is right of centre)
 //   2 = right beam only→ steer right (robot is left of centre)
 //   3 = both beams     → drive straight (robot is centred)
 //
-// Stop condition: robot commanded forward but odom velocity < stuck threshold
-// for stuck_timeout seconds → pogo pins have made contact → declare docked.
+// Docking is a HANDOFF: IR delivers the robot into the guide-rail mouth roughly
+// square; the guide rails + magnetic pogo pins (self-snap at ~2-4mm) do the final
+// alignment. IR does not need pogo precision.
+//
+// reverse:=true  → back in caster-first, so the low-friction rear swivel caster
+//   (not the rubber drive wheels, which resist lateral push) is what the rails
+//   square up — and the Orbbec/face/voice keep facing the room while charging.
+//   Requires the IR receivers mounted at the (rear) docking end. Find steer_sign
+//   empirically on first reverse test (flip to -1.0 if it diverges), same as we
+//   validated the forward sign. See project_ir_docking memory.
 //
 // Engage:  ros2 service call /dock_engage std_srvs/srv/SetBool "{data: true}"
 // Stop:    ros2 service call /dock_engage std_srvs/srv/SetBool "{data: false}"
@@ -22,13 +30,8 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 
-#include <algorithm>
 #include <cmath>
 #include <memory>
-
-namespace {
-double clamp(double v, double lo, double hi) { return std::max(lo, std::min(hi, v)); }
-}
 
 // IR bitmask values — must match ESP32 firmware
 static constexpr uint8_t IR_NONE  = 0;
@@ -39,13 +42,23 @@ static constexpr uint8_t IR_BOTH  = 3;
 class DockIr : public rclcpp::Node {
 public:
   DockIr() : Node("dock_ir") {
-    approach_speed_      = declare_parameter("approach_speed",      0.08);  // m/s forward
+    approach_speed_      = declare_parameter("approach_speed",      0.08);  // m/s
     steer_wz_            = declare_parameter("steer_wz",            0.20);  // rad/s when off-centre
     ir_timeout_          = declare_parameter("ir_timeout",          1.0);   // s — stop if no IR messages at all
-    beam_lost_timeout_   = declare_parameter("beam_lost_timeout",   2.0);   // s — stop if beam absent this long
+    beam_lost_timeout_   = declare_parameter("beam_lost_timeout",   2.0);   // s — retained for launch compatibility (unused)
     stuck_vel_threshold_ = declare_parameter("stuck_vel_threshold", 0.01);  // m/s — below this = physically stopped
-    stuck_timeout_       = declare_parameter("stuck_timeout",       3.0);   // s — stopped this long = docked
+    stuck_timeout_       = declare_parameter("stuck_timeout",       3.0);   // s — stalled this long WHILE DRIVING = docked
     control_rate_        = declare_parameter("control_rate",        20.0);  // Hz
+
+    // Reverse docking (back in caster-first) — default off preserves the forward dock.
+    reverse_             = declare_parameter("reverse",             false);
+    steer_sign_          = declare_parameter("steer_sign",          1.0);   // set -1.0 if reverse steering diverges
+
+    // Rotate-to-search on beam loss instead of aborting.
+    search_enabled_      = declare_parameter("search_enabled",      true);
+    beam_hold_           = declare_parameter("beam_hold",           0.8);   // s — hold last reading (bridge burst gaps) before searching
+    search_wz_           = declare_parameter("search_wz",           0.30);  // rad/s — rotate speed while searching
+    search_timeout_      = declare_parameter("search_timeout",      3.0);   // s — search this long, then give up
 
     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
 
@@ -56,10 +69,11 @@ public:
         last_ir_time_ = this->now();
         have_ir_      = true;
         if (val != IR_NONE) {
-          latest_ir_        = val;   // update steering state only on valid reading
-          last_beam_time_   = this->now();
+          latest_ir_      = val;   // steering state updates only on a valid reading
+          last_beam_time_ = this->now();
+          beam_ever_      = true;
         }
-        // IR_NONE ignored here — beam_lost_timeout handles disengage
+        // IR_NONE handled by beam_age/search logic in control_step
       });
 
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
@@ -72,7 +86,7 @@ public:
       engaged_ = engage;
       if (engaged_) {
         reset_state();
-        RCLCPP_INFO(get_logger(), "IR docking engaged.");
+        RCLCPP_INFO(get_logger(), "IR docking engaged (%s).", reverse_ ? "reverse" : "forward");
       } else {
         publish_zero();
         RCLCPP_INFO(get_logger(), "IR docking stopped.");
@@ -106,15 +120,15 @@ private:
     stuck_since_      = this->now();
     last_beam_time_   = this->now();
     moving_confirmed_ = false;
-    // have_ir_ intentionally NOT reset — IR signal flows continuously;
-    // ir_timeout handles stale detection independently of engage state.
+    beam_ever_        = false;
+    // have_ir_ intentionally NOT reset — IR flows continuously; ir_timeout handles staleness.
   }
 
   void control_step() {
     if (!engaged_) { publish_zero(); return; }
 
+    // Hard stop if the IR topic itself goes silent (ESP32 dropped, etc.)
     const bool ir_fresh = have_ir_ && (this->now() - last_ir_time_).seconds() < ir_timeout_;
-
     if (!ir_fresh) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "No IR signal — stopped.");
       publish_zero();
@@ -122,55 +136,69 @@ private:
       return;
     }
 
-    // Stuck detection: once we've confirmed the robot is moving, watch for it stopping
-    if (std::fabs(odom_linear_x_) > stuck_vel_threshold_) {
-      moving_confirmed_ = true;
-      stuck_since_      = this->now();
+    // Engaged but no beam acquired yet — hold still (place robot facing the dock).
+    if (!beam_ever_) {
+      publish_zero();
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "Waiting for beam...");
+      return;
     }
 
-    if (moving_confirmed_ && (this->now() - stuck_since_).seconds() > stuck_timeout_) {
-      RCLCPP_INFO(get_logger(), "Docked — robot stopped (pogo contact).");
+    const double drive    = reverse_ ? -approach_speed_ : approach_speed_;
+    const double beam_age = (this->now() - last_beam_time_).seconds();
+
+    geometry_msgs::msg::Twist cmd;
+    bool driving = false;
+
+    if (beam_age <= beam_hold_) {
+      // Beam present (or a brief burst gap) — drive on the last valid reading.
+      driving = true;
+      switch (latest_ir_) {
+        case IR_LEFT:
+          cmd.linear.x  = drive;
+          cmd.angular.z = steer_sign_ * steer_wz_;
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500, "LEFT beam — steer");
+          break;
+        case IR_RIGHT:
+          cmd.linear.x  = drive;
+          cmd.angular.z = -steer_sign_ * steer_wz_;
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500, "RIGHT beam — steer");
+          break;
+        case IR_BOTH:
+        default:
+          cmd.linear.x  = drive;
+          cmd.angular.z = 0.0;
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "BOTH beams — straight");
+          break;
+      }
+    } else if (search_enabled_ && beam_age <= beam_hold_ + search_timeout_) {
+      // Beam lost — rotate in place to re-acquire, toward the side last seen.
+      const double dir = (latest_ir_ == IR_RIGHT) ? -1.0 : 1.0;   // LEFT/BOTH → rotate +, RIGHT → rotate -
+      cmd.linear.x  = 0.0;
+      cmd.angular.z = steer_sign_ * dir * search_wz_;
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500, "Beam lost — searching...");
+    } else {
+      // Search exhausted (or disabled) — give up.
+      RCLCPP_WARN(get_logger(), "Beam lost — disengaging.");
       publish_zero();
       engaged_ = false;
       return;
     }
 
-    geometry_msgs::msg::Twist cmd;
-
-    switch (latest_ir_) {
-      case IR_BOTH:
-        // Centred — drive straight
-        cmd.linear.x  = approach_speed_;
-        cmd.angular.z = 0.0;
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "BOTH beams — straight");
-        break;
-
-      case IR_LEFT:
-        // Robot is right of centre — steer left (positive wz)
-        cmd.linear.x  = approach_speed_;
-        cmd.angular.z = steer_wz_;
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500, "LEFT beam — steer left");
-        break;
-
-      case IR_RIGHT:
-        // Robot is left of centre — steer right (negative wz)
-        cmd.linear.x  = approach_speed_;
-        cmd.angular.z = -steer_wz_;
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500, "RIGHT beam — steer right");
-        break;
-
-      case IR_NONE:
-      default:
-        // No beam — stop and wait; disengage only after beam_lost_timeout
-        if ((this->now() - last_beam_time_).seconds() > beam_lost_timeout_) {
-          RCLCPP_WARN(get_logger(), "Beam lost for %.1fs — disengaging.", beam_lost_timeout_);
-          publish_zero();
-          engaged_ = false;
-          return;
-        }
+    // Docked (pogo-contact) detection — only meaningful WHILE DRIVING IN.
+    // (Rotating during a search is a legitimate zero-linear-velocity state, not a stall.)
+    if (driving) {
+      if (std::fabs(odom_linear_x_) > stuck_vel_threshold_) {
+        moving_confirmed_ = true;
+        stuck_since_      = this->now();
+      }
+      if (moving_confirmed_ && (this->now() - stuck_since_).seconds() > stuck_timeout_) {
+        RCLCPP_INFO(get_logger(), "Docked — robot stopped (pogo contact).");
         publish_zero();
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500, "No beam — waiting...");
+        engaged_ = false;
         return;
+      }
+    } else {
+      stuck_since_ = this->now();   // searching — reset the stall clock
     }
 
     cmd_pub_->publish(cmd);
@@ -179,16 +207,19 @@ private:
   // params
   double approach_speed_, steer_wz_, ir_timeout_, beam_lost_timeout_;
   double stuck_vel_threshold_, stuck_timeout_, control_rate_;
+  bool   reverse_{false}, search_enabled_{true};
+  double steer_sign_{1.0}, beam_hold_{0.8}, search_wz_{0.30}, search_timeout_{3.0};
 
   // state
-  uint8_t         latest_ir_{IR_NONE};
-  rclcpp::Time    last_ir_time_;
-  bool            have_ir_{false};
-  bool            engaged_{false};
-  bool            moving_confirmed_{false};
-  rclcpp::Time    stuck_since_;
-  rclcpp::Time    last_beam_time_;
-  double          odom_linear_x_{0.0};
+  uint8_t      latest_ir_{IR_NONE};
+  rclcpp::Time last_ir_time_;
+  bool         have_ir_{false};
+  bool         engaged_{false};
+  bool         moving_confirmed_{false};
+  bool         beam_ever_{false};
+  rclcpp::Time stuck_since_;
+  rclcpp::Time last_beam_time_;
+  double       odom_linear_x_{0.0};
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr    cmd_pub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr      ir_sub_;
