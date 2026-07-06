@@ -26,8 +26,10 @@ def generate_launch_description():
     bringup_dir = get_package_share_directory('jupiter_bringup')
     ekf_config  = os.path.join(bringup_dir, 'config', 'ekf_odom.yaml')
 
-    reverse    = LaunchConfiguration('reverse')
-    steer_sign = LaunchConfiguration('steer_sign')
+    reverse        = LaunchConfiguration('reverse')
+    steer_sign     = LaunchConfiguration('steer_sign')
+    approach_speed = LaunchConfiguration('approach_speed')
+    steer_wz       = LaunchConfiguration('steer_wz')
 
     return LaunchDescription([
 
@@ -35,6 +37,10 @@ def generate_launch_description():
                               description='true = back into the dock caster-first'),
         DeclareLaunchArgument('steer_sign', default_value='1.0',
                               description='flip to -1.0 if reverse steering diverges'),
+        DeclareLaunchArgument('approach_speed', default_value='0.08',
+                              description='m/s drive speed (lower = gentler, less overshoot)'),
+        DeclareLaunchArgument('steer_wz', default_value='0.20',
+                              description='rad/s correction rate (lower = gentler, less overshoot)'),
 
         # ESP32: receives /cmd_vel, publishes /odom/unfiltered + /dock/ir
         ExecuteProcess(
@@ -55,8 +61,8 @@ def generate_launch_description():
         Node(package='jupiter_nodes', executable='dock_ir', name='dock_ir',
              output='screen',
              parameters=[{
-                 'approach_speed':       0.08,   # m/s
-                 'steer_wz':             0.20,   # rad/s correction when off-centre
+                 'approach_speed':       ParameterValue(approach_speed, value_type=float),
+                 'steer_wz':             ParameterValue(steer_wz, value_type=float),
                  'ir_timeout':           1.0,    # s — stop if no IR signal
                  'stuck_vel_threshold':  0.01,   # m/s — below = physically stopped
                  'stuck_timeout':        3.0,    # s — stopped this long = docked
