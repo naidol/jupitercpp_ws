@@ -44,7 +44,8 @@ public:
   DockIr() : Node("dock_ir") {
     approach_speed_      = declare_parameter("approach_speed",      0.08);  // m/s
     steer_wz_            = declare_parameter("steer_wz",            0.20);  // rad/s when off-centre
-    ir_timeout_          = declare_parameter("ir_timeout",          1.0);   // s — stop if no IR messages at all
+    ir_timeout_          = declare_parameter("ir_timeout",          1.0);   // s — normal max IR-msg gap before pausing
+    ir_hard_timeout_     = declare_parameter("ir_hard_timeout",     8.0);   // s — IR silent this long → give up (rides over ESP32 micro-ROS reconnects)
     beam_lost_timeout_   = declare_parameter("beam_lost_timeout",   2.0);   // s — retained for launch compatibility (unused)
     stuck_vel_threshold_ = declare_parameter("stuck_vel_threshold", 0.01);  // m/s — below this = physically stopped
     stuck_timeout_       = declare_parameter("stuck_timeout",       3.0);   // s — stalled this long WHILE DRIVING = docked
@@ -119,6 +120,7 @@ private:
   void reset_state() {
     stuck_since_      = this->now();
     last_beam_time_   = this->now();
+    engage_time_      = this->now();
     moving_confirmed_ = false;
     beam_ever_        = false;
     // have_ir_ intentionally NOT reset — IR flows continuously; ir_timeout handles staleness.
@@ -127,12 +129,21 @@ private:
   void control_step() {
     if (!engaged_) { publish_zero(); return; }
 
-    // Hard stop if the IR topic itself goes silent (ESP32 dropped, etc.)
-    const bool ir_fresh = have_ir_ && (this->now() - last_ir_time_).seconds() < ir_timeout_;
-    if (!ir_fresh) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "No IR signal — stopped.");
+    // IR message flow. Brief silence — the ESP32 re-attaching to a fresh agent, or a
+    // mid-approach micro-ROS blip — means STOP and WAIT (stay engaged). Give up only
+    // if the topic stays silent for ir_hard_timeout.
+    const double ir_gap = have_ir_ ? (this->now() - last_ir_time_).seconds()
+                                   : (this->now() - engage_time_).seconds();
+    if (ir_gap > ir_hard_timeout_) {
+      RCLCPP_WARN(get_logger(), "No IR signal for %.1fs — disengaging.", ir_gap);
       publish_zero();
       engaged_ = false;
+      return;
+    }
+    if (!have_ir_ || ir_gap > ir_timeout_) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "Waiting for IR signal...");
+      publish_zero();
+      stuck_since_ = this->now();   // paused, not stalled
       return;
     }
 
@@ -205,7 +216,7 @@ private:
   }
 
   // params
-  double approach_speed_, steer_wz_, ir_timeout_, beam_lost_timeout_;
+  double approach_speed_, steer_wz_, ir_timeout_, ir_hard_timeout_, beam_lost_timeout_;
   double stuck_vel_threshold_, stuck_timeout_, control_rate_;
   bool   reverse_{false}, search_enabled_{true};
   double steer_sign_{1.0}, beam_hold_{0.8}, search_wz_{0.30}, search_timeout_{3.0};
@@ -219,6 +230,7 @@ private:
   bool         beam_ever_{false};
   rclcpp::Time stuck_since_;
   rclcpp::Time last_beam_time_;
+  rclcpp::Time engage_time_;
   double       odom_linear_x_{0.0};
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr    cmd_pub_;
