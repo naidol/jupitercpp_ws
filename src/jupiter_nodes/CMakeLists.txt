@@ -50,12 +50,27 @@ add_executable(jupiter_face_recognition src/face_recognition.cpp)
 add_executable(scan_deskew_node src/scan_deskew_node.cpp)
 add_executable(dock_approach src/dock_approach.cpp)
 add_executable(dock_ir src/dock_ir.cpp)
+add_executable(dock_range src/dock_range.cpp)
+add_executable(webcam_publisher src/webcam_publisher.cpp)
 # Link ROS2 dependencies
 ament_target_dependencies(scan_deskew_node
   rclcpp
   sensor_msgs
   nav_msgs
 )
+
+ament_target_dependencies(dock_range
+  rclcpp
+  sensor_msgs
+  std_msgs
+)
+
+ament_target_dependencies(webcam_publisher
+  rclcpp
+  sensor_msgs
+  cv_bridge
+)
+target_link_libraries(webcam_publisher ${OpenCV_LIBS})
 
 ament_target_dependencies(dock_approach
   rclcpp
@@ -69,6 +84,7 @@ ament_target_dependencies(dock_approach
 ament_target_dependencies(dock_ir
   rclcpp
   geometry_msgs
+  sensor_msgs
   std_msgs
   nav_msgs
   std_srvs
@@ -156,6 +172,8 @@ install(TARGETS
   scan_deskew_node
   dock_approach
   dock_ir
+  dock_range
+  webcam_publisher
   DESTINATION lib/${PROJECT_NAME}
 )
 
