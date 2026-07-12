@@ -41,6 +41,6 @@ def generate_launch_description():
         # the stale comment said pi). VERIFY vs reality in RViz; flip to 3.14159 if the scan is reversed.
         Node(
             package='tf2_ros', executable='static_transform_publisher', name='base_to_ld20_laser',
-            arguments=['0.06', '0', '0.13', '0', '0', '0', 'base_footprint', 'ld20_laser'],
+            arguments=['0.06', '0', '0.1475', '0', '0', '0', 'base_footprint', 'ld20_laser'],  # +17.5mm: 100mm AGV wheels
         ),
     ])

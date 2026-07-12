@@ -80,7 +80,7 @@ def generate_launch_description():
         Node(
             package='tf2_ros', executable='static_transform_publisher',
             name='base_link_to_base_laser',
-            arguments=['0.035', '0.0', '0.515', '3.14159265', '0', '0', 'base_footprint', 'base_laser'],
+            arguments=['0.035', '0.0', '0.5325', '3.14159265', '0', '0', 'base_footprint', 'base_laser'],  # +17.5mm: 100mm AGV wheels
         ),
 
         # LD20 LOW lidar (LD19 profile) — /scan_low in frame ld20_laser, ~0.13 m above ground.
@@ -104,7 +104,7 @@ def generate_launch_description():
         Node(
             package='tf2_ros', executable='static_transform_publisher',
             name='base_to_ld20_laser',
-            arguments=['0.06', '0', '0.13', '0', '0', '0', 'base_footprint', 'ld20_laser'],
+            arguments=['0.06', '0', '0.1475', '0', '0', '0', 'base_footprint', 'ld20_laser'],  # +17.5mm: 100mm AGV wheels
         ),
         # Static TF base_footprint -> imu_link (BNO055)
         Node(

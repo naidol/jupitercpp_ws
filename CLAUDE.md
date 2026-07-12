@@ -70,11 +70,10 @@
 - Nav2: MPPI controller (Omni motion model for mecanum), full Nav2 stack configured
 - Master launch: ros2 launch jupiter_bringup jupiter_bringup.launch.py (mode:=slam or mode:=nav)
 - ESP32 auto-reconnect: 4-state micro-ROS state machine (WAITING→AVAILABLE→CONNECTED→DISCONNECTED), no physical reset needed
-- ESP32 battery monitoring: publishes sensor_msgs/BatteryState on /battery/state at 1Hz (hardware divider not yet wired)
+- ESP32 battery monitoring: publishes sensor_msgs/BatteryState on /battery/state at 1Hz (R1=100kΩ/R2=22kΩ divider on GPIO34 fitted and working — reads true pack voltage)
 
 ## Known Issues / Workarounds
 - systemd services jupiter-microros and jupiter-lidar are DISABLED during development
-- Battery voltage readings garbage until R1=100kΩ/R2=22kΩ divider physically wired to GPIO34
 
 ## Goals for This Session
 - [Update this each session with what you want to achieve]
