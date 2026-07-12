@@ -58,8 +58,8 @@
 // Per-motor trim to compensate physical motor mismatch.
 // Tune: if robot drifts right, reduce MOTOR1_TRIM. If drifts left, reduce MOTOR2_TRIM.
 // Levelled chassis reading: motor1~115 RPM, motor2~137 RPM → motor2 trim = 115/137 = 0.84
-#define MOTOR1_TRIM 0.92f
-#define MOTOR2_TRIM 0.93f
+#define MOTOR1_TRIM 1.00f                   // reset to neutral 2026-07-11: old 0.92/0.93 were tuned for the 65mm soft wheels
+#define MOTOR2_TRIM 1.00f                   // and caused a forward LEFT-bank on the 100mm AGV wheels; re-tune on new wheels
 
 
 // MOTOR AND ROBOT SPECS
@@ -79,11 +79,11 @@
 #define PWM_MAX pow(2, PWM_BITS) - 1        // e.g. for 8-bit PWM_MAX = 2^8 - 1 = 256 - 1 = 255
 #define PWM_MIN -PWM_MAX
 #define USE_PID true                        // true = PID controller ON. Switch OFF (false). See Note (1) below
-#define WHEEL_RADIUS 0.0325                 // in meters (65mm rubber wheels)
-#define WHEEL_SEPARATION 0.346              // distance between left and right wheels (centre to centre) in meters
+#define WHEEL_RADIUS 0.050                  // in meters (100mm AGV wheels, installed 2026-07-11; was 0.0325/65mm rubber)
+#define WHEEL_SEPARATION 0.355              // centre-to-centre, meters (100mm AGV wheels: 0.385 out-out minus one 30mm wheel width; was 0.346)
 #define WHEEL_BASE 0.180                    // <-- ADD THIS: distance from front axle to rear axle in meters
-#define PWM_FWD_MIN 1                       // these two PWM_FWD & PWM_REV are needed to balance the startup power needed 
-#define PWM_REV_MIN 1                       // for each direction (helps to drive straight)
+#define PWM_FWD_MIN 1                       // these two PWM_FWD & PWM_REV are needed to balance the startup power needed
+#define PWM_REV_MIN 1                       // for each direction (helps to drive straight)  [REVERTED 2026-07-11: floor/kick experiments made drive worse — see project memory]
 
 // NOTES
 // (1)  Without PID control, the robot motors may only spin at higher speed commands from cmd_vel as there is no feedback from the wheel encoders

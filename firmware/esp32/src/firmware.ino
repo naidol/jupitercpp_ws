@@ -89,6 +89,12 @@ sensor_msgs__msg__BatteryState battery_msg;
 rcl_publisher_t dock_ir_publisher;
 std_msgs__msg__UInt8 dock_ir_msg;
 
+// Graded IR alignment signal: per-side demodulated-burst RATE (edges/sec) — the
+// "heartbeat" you see on the receiver LEDs. Strong/aligned = high rate; off-axis =
+// fewer bursts caught = lower rate. left-right difference => steer; both-high => square.
+rcl_publisher_t dock_ir_rate_publisher;
+std_msgs__msg__Float32MultiArray dock_ir_rate_msg;   // [left_edges_per_s, right_edges_per_s]
+
 // IR dock receiver detection. The beacon sends 38kHz burst PACKETS; the TSOP
 // demodulates each burst into an output pulse. We count those pulses via
 // FALLING-edge interrupts and mark a channel "detected" if it saw edges within
@@ -356,6 +362,19 @@ void timerCallback(rcl_timer_t *timer, int64_t last_call_time)
     uint8_t ir_right = (re && (nowm - right_seen_ms) < IR_DETECT_TIMEOUT_MS) ? IR_DOCK_RIGHT : 0;
     dock_ir_msg.data = ir_left | ir_right;
     RCSOFTCHECK(rcl_publish(&dock_ir_publisher, &dock_ir_msg, NULL));
+
+    // Per-side burst RATE (edges/sec) over the callback window — the graded alignment
+    // "heartbeat". Consumer smooths + uses (left-right) to steer, (left+right) for proximity.
+    static uint32_t rate_prev_left = 0, rate_prev_right = 0, rate_prev_ms = 0;
+    if (rate_prev_ms == 0) rate_prev_ms = nowm;
+    uint32_t rate_dt = nowm - rate_prev_ms;
+    if (rate_dt > 0) {
+        float inv = 1000.0f / (float)rate_dt;
+        dock_ir_rate_msg.data.data[0] = (float)(le - rate_prev_left)  * inv;   // left  edges/s
+        dock_ir_rate_msg.data.data[1] = (float)(re - rate_prev_right) * inv;   // right edges/s
+        rate_prev_left = le; rate_prev_right = re; rate_prev_ms = nowm;
+        RCSOFTCHECK(rcl_publish(&dock_ir_rate_publisher, &dock_ir_rate_msg, NULL));
+    }
 }
 
 // ---- micro-ROS entity lifecycle ----
@@ -396,6 +415,11 @@ bool create_entities()
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
         "/dock/ir"));
 
+    CREATE_CHECK(rclc_publisher_init_default(
+        &dock_ir_rate_publisher, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+        "/dock/ir_rate"));
+
     CREATE_CHECK(rclc_subscription_init_default(
         &cmd_vel_subscriber, &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
@@ -434,6 +458,7 @@ void destroy_entities()
     (void)rcl_publisher_fini(&speed_publisher,   &node);
     (void)rcl_publisher_fini(&battery_publisher, &node);
     (void)rcl_publisher_fini(&dock_ir_publisher, &node);
+    (void)rcl_publisher_fini(&dock_ir_rate_publisher, &node);
     (void)rcl_subscription_fini(&cmd_vel_subscriber,  &node);
     (void)rcl_subscription_fini(&save_imu_subscriber, &node);
     (void)rcl_timer_fini(&timer);
@@ -465,6 +490,7 @@ void setup()
     motor4_encoder.reset();
 
     Wire.begin(21, 22);
+    Wire.setClock(400000);   // BNO055 Fast Mode (4x the default 100kHz) — cuts IMU read time
     setup_oled_display();
     setup_imu(&imu_msg);
     setup_battery_adc();
@@ -488,6 +514,10 @@ void setup()
     speed_msg.data.size     = 5;
     speed_msg.data.capacity = 5;
     speed_msg.data.data     = (float_t *)malloc(5 * sizeof(float_t));
+
+    dock_ir_rate_msg.data.size     = 2;
+    dock_ir_rate_msg.data.capacity = 2;
+    dock_ir_rate_msg.data.data     = (float_t *)malloc(2 * sizeof(float_t));
 
     // Transport is set once; support/node/entities are rebuilt on each reconnect.
     set_microros_serial_transports(Serial);

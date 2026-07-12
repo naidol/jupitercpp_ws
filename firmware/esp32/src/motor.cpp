@@ -19,12 +19,13 @@ Motor::Motor(uint8_t pwm_pin, uint8_t dir_pin, uint8_t pwm_channel, uint32_t pwm
 // Function to set motor speed and direction
 void Motor::setSpeed(int speed) {
     if (speed == 0) {
-        // Full stop: Disable the PWM signal by writing 0 duty cycle
-        ledcWrite(pwm_channel_, 0);
-        
-        // Optionally set both motor pins to LOW for braking
-        digitalWrite(dir_pin_, LOW);
-    } 
+        // BRAKE, not coast. IN/IN bridge: both pins HIGH = brake (slow decay), both LOW = coast.
+        // Restores the ORIGINAL instant-stop behaviour (wheels froze mid-air on cmd_vel=0). The
+        // previous "PWM 0 + dir LOW" = both-LOW = FREEWHEEL, which crept in and caused coast-past
+        // stops, heading overshoot and oscillation. (fixed 2026-07-11)
+        digitalWrite(dir_pin_, HIGH);
+        ledcWrite(pwm_channel_, PWM_MAX);
+    }
     else if (speed > 0) {
         // Set direction to forward
         digitalWrite(dir_pin_, HIGH);

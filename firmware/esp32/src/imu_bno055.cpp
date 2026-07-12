@@ -99,34 +99,24 @@ void perform_imu_save() {
 }
 
 // Get IMU data and update the &imu_msg and refresh the Oled display with latest IMU data 
+// OLED (temp/euler/gravity/calibration) is a human status display — refresh it every
+// OLED_EVERY IMU cycles (~2 Hz at the ~12 Hz loop) instead of every cycle. Those extra
+// I2C reads are what used to bloat the hot path and starve the micro-ROS loop.
+#define OLED_EVERY 6
+
 void get_imu_data(sensor_msgs__msg__Imu* imu_msg) {
-    // Get the BNO055 calibration status
-    uint8_t system, gyro, accel, mag = 0;
-    bno.getCalibration(&system, &gyro, &accel, &mag);
-    // Read the 9DOF sensor data
-    sensors_event_t orientationData , angVelocityData , linearAccelData, magnetometerData, accelerometerData, gravityData;
-    bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+    // HOT PATH — read ONLY the 3 vectors we publish (gyro, linear-accel, quaternion),
+    // every cycle. Kept lean (was 9 I2C reads at 100kHz ~= 45ms; now 3 at 400kHz ~= 4ms)
+    // so the micro-ROS session has headroom and doesn't drop under load.
+    sensors_event_t angVelocityData, linearAccelData;
     bno.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);
     bno.getEvent(&linearAccelData, Adafruit_BNO055::VECTOR_LINEARACCEL);
-    bno.getEvent(&magnetometerData, Adafruit_BNO055::VECTOR_MAGNETOMETER);
-    bno.getEvent(&accelerometerData, Adafruit_BNO055::VECTOR_ACCELEROMETER);
-    bno.getEvent(&gravityData, Adafruit_BNO055::VECTOR_GRAVITY);
-
-    /* Read the current temperature from BNO055 */
-    int8_t temp = bno.getTemp();
-
-    // Read the BNO055 Quaternion
     imu::Quaternion quat = bno.getQuat();
-
-    // Fill the ROS2 message for IMU data
-    // imu_msg->header.stamp.nanosec = (uint32_t)(millis() * 1e6);
-    // imu_msg->header.stamp.sec = (uint32_t)(millis() / 1000);
-    
 
     imu_msg->orientation.x = quat.x();
     imu_msg->orientation.y = quat.y();
     imu_msg->orientation.z = quat.z();
-    imu_msg->orientation.w = quat.w(); 
+    imu_msg->orientation.w = quat.w();
 
     imu_msg->angular_velocity.x = angVelocityData.gyro.x;
     imu_msg->angular_velocity.y = angVelocityData.gyro.y;
@@ -136,13 +126,21 @@ void get_imu_data(sensor_msgs__msg__Imu* imu_msg) {
     imu_msg->linear_acceleration.y = linearAccelData.acceleration.y;
     imu_msg->linear_acceleration.z = linearAccelData.acceleration.z;
 
-    // Display IMU data on OLED
-    display_oled_imu_data(temp, orientationData.acceleration.heading,
-                          orientationData.acceleration.pitch,
-                          orientationData.acceleration.roll,
-                          gravityData.gyro.x,
-                          gravityData.gyro.y,
-                          gravityData.gyro.z,
-                          system, gyro, accel, mag);
-    
+    // COLD PATH — the OLED-only reads (calibration/euler/gravity/temp), throttled.
+    // (MAGNETOMETER + ACCELEROMETER reads removed entirely — they were never used.)
+    static uint8_t oled_ctr = 0;
+    if (++oled_ctr >= OLED_EVERY) {
+        oled_ctr = 0;
+        uint8_t system, gyro, accel, mag = 0;
+        bno.getCalibration(&system, &gyro, &accel, &mag);
+        sensors_event_t orientationData, gravityData;
+        bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+        bno.getEvent(&gravityData, Adafruit_BNO055::VECTOR_GRAVITY);
+        int8_t temp = bno.getTemp();
+        display_oled_imu_data(temp, orientationData.acceleration.heading,
+                              orientationData.acceleration.pitch,
+                              orientationData.acceleration.roll,
+                              gravityData.gyro.x, gravityData.gyro.y, gravityData.gyro.z,
+                              system, gyro, accel, mag);
+    }
 }
