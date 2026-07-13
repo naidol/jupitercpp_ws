@@ -67,6 +67,7 @@ public:
 
     // FAR phase — AprilTag bearing null (lateral @ distance).
     k_bearing_        = declare_parameter("k_bearing",        0.30);  // rad/s per rad of tag bearing (P)
+    align_wz_min_     = declare_parameter("align_wz_min",     0.35);  // rad/s — minimum ALIGN rotation command (below this the base stalls rotationally, PIDs wind up, lurch)
     k_bearing_d_      = declare_parameter("k_bearing_d",      0.15);  // rad/s per rad/s of bearing rate (D — damps the ring)
     bearing_deadband_ = declare_parameter("bearing_deadband", 0.05);  // rad — don't chase noise inside this
     handoff_dist_     = declare_parameter("handoff_dist",     0.35);  // m — tag z at/below this -> hand off to IR near phase
@@ -237,6 +238,7 @@ private:
       else if (n == "contact_dist")        contact_dist_        = p.as_double();
       else if (n == "k_bearing")           k_bearing_           = p.as_double();
       else if (n == "k_bearing_d")         k_bearing_d_         = p.as_double();
+      else if (n == "align_wz_min")        align_wz_min_        = p.as_double();
       else if (n == "bearing_deadband")    bearing_deadband_    = p.as_double();
       else if (n == "handoff_dist")        handoff_dist_        = p.as_double();
       else if (n == "near_commit_dist")    near_commit_dist_    = p.as_double();
@@ -415,8 +417,13 @@ private:
       double wz = 0.0;
       if (aligning_) {
         cmd.linear.x = 0.0;
-        wz = std::clamp(apriltag_steer_sign_ * (k_bearing_ * bearing + k_bearing_d_ * bearing_rate),
-                        -0.25, 0.25);
+        // Minimum rotation authority: a small PD output stalls against rotational stiction, the
+        // wheel PIDs wind up, and the release is a violent lurch that sweeps the tag out of frame
+        // (proven twice). If we turn at all, turn at >= align_wz_min — hysteresis exit (0.10 rad)
+        // still bounds the overshoot.
+        const double pd = apriltag_steer_sign_ * (k_bearing_ * bearing + k_bearing_d_ * bearing_rate);
+        wz = std::clamp((pd >= 0 ? 1.0 : -1.0) * std::max(std::fabs(pd), align_wz_min_),
+                        -0.45, 0.45);
       } else {
         // Driving: steer only while actually translating (vision-confirmed via tag z-rate) — a
         // stationary robot given wz while "driving" is stiction-pivot, not steering.
@@ -584,7 +591,7 @@ private:
 
   // params
   double approach_speed_, near_speed_, contact_dist_, stall_band_;
-  double k_bearing_, k_bearing_d_, bearing_deadband_, handoff_dist_, near_commit_dist_, tag_timeout_, tag_alpha_, apriltag_steer_sign_;
+  double k_bearing_, k_bearing_d_, align_wz_min_, bearing_deadband_, handoff_dist_, near_commit_dist_, tag_timeout_, tag_alpha_, apriltag_steer_sign_;
   double handoff_x_max_, handoff_angle_max_, dock_x_ref_, dock_x_tol_;
   double retry_dist_, go_steer_sign_, go_around_timeout_, forward_clear_min_;
   int    max_attempts_{3};

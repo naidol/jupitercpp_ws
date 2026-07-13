@@ -1,0 +1,72 @@
+# Copyright 2026 Logan Naidoo <naidoo.logan@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nav2 Docking Server (opennav_docking 1.3.x, Jazzy binaries) — Jupiter charging dock.
+#
+# Architecture (2026-07-12 pivot): the bespoke dock_ir controller drove the approach open-loop
+# and could not survive the base's asymmetric wheel breakaway. This server runs the graceful
+# (Park-Kuipers) control law CLOSED-LOOP on the live AprilTag dock pose fused with odom, docking
+# BACKWARD (caster-first into the guide rails), with retries built in.
+#
+# Detection: jupiter_vision publishes the 80mm tag36h11 pose (camera optical frame) from the rear
+# webcam -> remapped to this server's detected_dock_pose. The tag is mounted on a dock-fixed stand,
+# centred on the pogo axis, ~105mm in front of the wall.
+#
+# Bench test (no Nav2 needed): call the DockRobot action with navigate_to_staging_pose:=false.
+
+docking_server:
+  ros__parameters:
+    controller_frequency: 20.0
+    initial_perception_timeout: 5.0     # s to first tag fix after action start
+    wait_charge_timeout: 5.0            # s to see charging after contact (harmless until handshake built)
+    dock_approach_timeout: 60.0         # slow ice-skate approach needs time
+    undock_linear_tolerance: 0.05
+    undock_angular_tolerance: 0.1
+    max_retries: 3
+    base_frame: "base_footprint"
+    fixed_frame: "odom"
+    dock_backwards: true                # caster-first into the rails; rear webcam faces the dock
+    dock_prestaging_tolerance: 0.5
+
+    dock_plugins: ["jupiter_dock"]
+    jupiter_dock:
+      plugin: "opennav_docking::SimpleChargingDock"
+      # --- detection ---
+      use_external_detection_pose: true       # subscribe detected_dock_pose (remap from vision)
+      external_detection_timeout: 1.0         # tag drops brief (motion blur) — ride through
+      filter_coef: 0.1                        # pose low-pass
+      # Tag optical frame -> dock frame: optical z(out of camera toward tag) becomes dock x
+      # (approach axis). Standard optical->ROS rotation; trim after first bench reads.
+      external_detection_translation_x: 0.0
+      external_detection_translation_y: 0.0
+      external_detection_rotation_roll: -1.5708
+      external_detection_rotation_pitch: 1.5708
+      external_detection_rotation_yaw: 0.0
+      # --- docked / charging ---
+      docking_threshold: 0.04                 # m pose-distance = docked (prox sensors will replace)
+      use_battery_status: false               # enable when the SSR charge handshake is built
+      use_stall_detection: false              # no joint_states on this base
+      # --- staging (used with Nav2; bench tests bypass) ---
+      staging_x_offset: -0.90                 # 0.9m in FRONT of dock, facing away (backward dock)
+      staging_yaw_offset: 0.0
+
+    # Graceful controller — closed-loop smooth control law. Speeds = "ice skates" values.
+    controller:
+      k_phi: 2.0
+      k_delta: 1.0
+      beta: 0.4
+      lambda: 2.0
+      v_linear_min: 0.06        # deadband floor: commands below this stall the base
+      v_linear_max: 0.08        # user: slow — the rails need time to thread the caster
+      v_angular_max: 0.4
+      slowdown_radius: 0.25
+      use_collision_detection: false   # no costmap in the bench bringup; enable under full Nav2
+
+# Dock instances (map poses used with Nav2 staging; bench tests pass the pose in the action)
+dock_database:
+  ros__parameters:
+    docks: ["home_dock"]
+    home_dock:
+      type: "jupiter_dock"
+      frame: "map"
+      pose: [0.0, 0.0, 0.0]   # TODO: set from the map once Nav2 staging is wired

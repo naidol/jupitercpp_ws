@@ -56,8 +56,8 @@ def generate_launch_description():
                               description='m/s TRUE — rail-thread + seat; already rolling at handoff so no breakaway needed (old "0.05" = 0.077 true)'),
         DeclareLaunchArgument('Ky_balance', default_value='0.0',
                               description='0 = NEAR drives STRAIGHT, rails square it (IR balance saturates+crabs at the mouth)'),
-        DeclareLaunchArgument('dock_depth', default_value='0.319',
-                              description='m — wall -> pogo-contact plane (re-measured 2026-07-11 with 100mm wheels/new caster holder: wall=0.349 at physical seat, minus 0.03 contact_dist)'),
+        DeclareLaunchArgument('dock_depth', default_value='0.212',
+                              description='m — FRAME-plane -> seat (re-measured 2026-07-12 vs the new tag-frame stand: frame=0.242 at physical seat, minus 0.03 contact_dist; re-zero when pogo bracket mounts)'),
         DeclareLaunchArgument('contact_dist', default_value='0.03',
                               description='m — stop when dist_to_pogo <= this'),
         DeclareLaunchArgument('apriltag_steer_sign', default_value='-1.0',
@@ -102,7 +102,7 @@ def generate_launch_description():
              parameters=[{
                  'scan_topic':       '/scan',
                  'rear_bearing_deg': 0.0,
-                 'sector_half_deg':  10.0,
+                 'sector_half_deg':  5.5,   # narrowed 2026-07-12: range against the dock's 280mm-wide TAG-FRAME plane (dock-fixed, 105mm in front of wall) — ±10° clipped wall at the edges -> INVALID
                  'dock_depth':       ParameterValue(dock_depth, value_type=float),
              }]),
 
