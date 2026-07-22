@@ -30,16 +30,29 @@
 // Define Onboard LED
 #define ESP32_LED 2
 
-// IR dock receivers — freed rear encoder pins (motors 3 & 4 removed)
-// KY-022 OUT is active LOW: LOW = 38kHz signal detected, HIGH = no signal
-#define IR_RECV_LEFT   13   // front-left receiver → GPIO13 (was MOTOR3_ENC_A)
-#define IR_RECV_RIGHT  15   // front-right receiver → GPIO15 (was MOTOR4_ENC_B)
+// Dock PROXIMITY sensors (LJ18A3-8-Z/BX, NPN open-collector, 12V supply) on the freed
+// rear-encoder pins (the dead IR receivers that lived here were removed 2026-07).
+// INPUT_PULLUP: HIGH = clear, LOW = metal detected (= physical contact with the dock).
+#define PROX_LEFT_PIN   13      // rear-left  (was MOTOR3_ENC_A / IR_RECV_LEFT)
+#define PROX_RIGHT_PIN  15      // rear-right (was MOTOR4_ENC_B / IR_RECV_RIGHT)
+#define PROX_DEBOUNCE_CYCLES 5  // timer cycles (20ms each) both-LOW before "seated" latches (and clear before it drops)
 
-// /dock/ir bitmask: bit0=left detected, bit1=right detected
-#define IR_DOCK_NONE   0    // no beam visible
-#define IR_DOCK_LEFT   1    // left beam only  → steer left
-#define IR_DOCK_RIGHT  2    // right beam only → steer right
-#define IR_DOCK_BOTH   3    // both beams      → drive straight
+// Dock charge-enable IR EMITTER: TSAL6400 + 220R on GPIO4 (freed MOTOR4_ENC_A pin).
+// 38kHz carrier (LEDC) gated in short-burst packets (TSOP-AGC-friendly — same envelope
+// as the proven dock_beacon: 600us on/off x10 bursts, then 40ms gap ≈ 19 packets/s).
+// Fires ONLY while seated (both prox) AND battery below full — the dock's Nano needs
+// sustained packets to hold the SSR closed (dead-man's keepalive).
+#define IR_EMIT_PIN        4
+#define IR_EMIT_LEDC_CH    4          // LEDC channels 0-3 are the motors
+#define IR_BURST_ON_US     600UL
+#define IR_BURST_OFF_US    600UL
+#define IR_BURSTS_PER_PKT  10
+#define IR_PACKET_GAP_MS   40
+#define BATTERY_FULL_STOP  16.70f     // stop requesting charge above this (4S full = 16.8V)
+
+// cmd_vel WATCHDOG: no cmd_vel for this long -> motors stop (brake). Without it the last
+// command LATCHES FOREVER if every publisher dies (proven: runaway spin into the doorway).
+#define CMD_VEL_TIMEOUT_MS 400
 
 // Battery ADC (GPIO34 = ADC1_CHANNEL_6, input-only pin)
 #define BATTERY_ADC_CHANNEL  ADC1_CHANNEL_6

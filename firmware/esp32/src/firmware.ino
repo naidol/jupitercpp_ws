@@ -86,24 +86,45 @@ nav_msgs__msg__Odometry odom_msg;
 rcl_publisher_t battery_publisher;
 sensor_msgs__msg__BatteryState battery_msg;
 
-rcl_publisher_t dock_ir_publisher;
-std_msgs__msg__UInt8 dock_ir_msg;
+// Dock contact state from the proximity sensors: bit0 = left, bit1 = right.
+// Both bits set = seated square against the dock.
+rcl_publisher_t dock_contact_publisher;
+std_msgs__msg__UInt8 dock_contact_msg;
 
-// Graded IR alignment signal: per-side demodulated-burst RATE (edges/sec) — the
-// "heartbeat" you see on the receiver LEDs. Strong/aligned = high rate; off-axis =
-// fewer bursts caught = lower rate. left-right difference => steer; both-high => square.
-rcl_publisher_t dock_ir_rate_publisher;
-std_msgs__msg__Float32MultiArray dock_ir_rate_msg;   // [left_edges_per_s, right_edges_per_s]
+// ---- Dock charge-enable emitter (TSAL6400, 38kHz LEDC burst packets) ----
+// The envelope runs in a FreeRTOS task pinned to core 0 (loop()/micro-ROS own core 1),
+// because the 600us burst timing can't survive the executor's ~10ms spin blocking.
+// ledcWrite from task context is safe; ir_emit_active is the single control flag.
+volatile bool ir_emit_active = false;
 
-// IR dock receiver detection. The beacon sends 38kHz burst PACKETS; the TSOP
-// demodulates each burst into an output pulse. We count those pulses via
-// FALLING-edge interrupts and mark a channel "detected" if it saw edges within
-// IR_DETECT_TIMEOUT_MS (> beacon packet period ~52ms, so it holds between packets).
-#define IR_DETECT_TIMEOUT_MS 80
-volatile uint32_t ir_left_edges  = 0;
-volatile uint32_t ir_right_edges = 0;
-void IRAM_ATTR irLeftISR()  { ir_left_edges++;  }
-void IRAM_ATTR irRightISR() { ir_right_edges++; }
+void irEmitterTask(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        if (ir_emit_active) {
+            for (uint8_t i = 0; i < IR_BURSTS_PER_PKT && ir_emit_active; i++) {
+                ledcWrite(IR_EMIT_LEDC_CH, 128);            // 50% duty @ 38kHz = carrier ON
+                delayMicroseconds(IR_BURST_ON_US);
+                ledcWrite(IR_EMIT_LEDC_CH, 0);              // carrier OFF
+                delayMicroseconds(IR_BURST_OFF_US);
+            }
+            vTaskDelay(pdMS_TO_TICKS(IR_PACKET_GAP_MS));    // AGC-reset gap between packets
+        } else {
+            ledcWrite(IR_EMIT_LEDC_CH, 0);
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+}
+
+// ---- Dock contact + charge state (updated each timer cycle) ----
+bool prox_left_contact  = false;
+bool prox_right_contact = false;
+bool dock_seated        = false;   // debounced both-sensors latch
+static uint8_t seat_debounce = 0;
+static float   last_battery_v = 0.0f;
+
+// ---- cmd_vel watchdog ----
+volatile unsigned long last_cmd_vel_ms = 0;
 
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -219,6 +240,7 @@ void publish_battery()
     if (bat_ma_count < BATTERY_MA_SIZE) bat_ma_count++;
 
     float v = bat_ma_sum / bat_ma_count;
+    last_battery_v = v;   // used by the charge-enable gate (stop emitting at full)
     float pct = (v - BATTERY_V_MIN) / (BATTERY_V_MAX - BATTERY_V_MIN);
     if (pct < 0.0f) pct = 0.0f;
     if (pct > 1.0f) pct = 1.0f;
@@ -242,6 +264,23 @@ void moveBase(float dt)
 {
     float current_rpm1, current_rpm2, current_rpm3, current_rpm4;
     float target_rpm1,  target_rpm2,  target_rpm3,  target_rpm4;
+
+    // cmd_vel WATCHDOG: publisher died / network hiccup -> stop, don't latch the last command.
+    if (millis() - last_cmd_vel_ms > CMD_VEL_TIMEOUT_MS) {
+        target_linear_velocity   = 0;
+        target_linear_y_velocity = 0;
+        target_angular_velocity  = 0;
+    }
+
+    // Prox REFLEX (endstop-style): any dock contact blocks further REVERSE drive instantly;
+    // when fully seated also block rotation (no grinding against the dock). FORWARD stays
+    // allowed always — that's how the robot undocks.
+    if ((prox_left_contact || prox_right_contact) && target_linear_velocity < 0) {
+        target_linear_velocity = 0;
+    }
+    if (dock_seated) {
+        target_angular_velocity = 0;
+    }
 
     Kinematics::MotorRPM req_rpm = kinematics.calculateRPM(
         target_linear_velocity, target_linear_y_velocity, target_angular_velocity);
@@ -327,6 +366,7 @@ void cmdVelCallback(const void * msgin)
     target_linear_velocity   = msg->linear.x;
     target_linear_y_velocity = msg->linear.y;
     target_angular_velocity  = msg->angular.z;
+    last_cmd_vel_ms = millis();   // feed the watchdog
 }
 
 void timerCallback(rcl_timer_t *timer, int64_t last_call_time)
@@ -337,6 +377,24 @@ void timerCallback(rcl_timer_t *timer, int64_t last_call_time)
     unsigned long now = millis();
     float dt = (now - prev_clk_time) / 1000.0f;
     prev_clk_time = now;
+
+    // Poll dock proximity sensors BEFORE moveBase so the reflex uses this cycle's truth.
+    prox_left_contact  = (digitalRead(PROX_LEFT_PIN)  == LOW);
+    prox_right_contact = (digitalRead(PROX_RIGHT_PIN) == LOW);
+
+    // Debounced "seated" latch: both sensors held for PROX_DEBOUNCE_CYCLES to set,
+    // both clear for the same count to release (no SSR chatter from contact bounce).
+    if (prox_left_contact && prox_right_contact) {
+        if (seat_debounce < PROX_DEBOUNCE_CYCLES) seat_debounce++;
+        if (seat_debounce >= PROX_DEBOUNCE_CYCLES) dock_seated = true;
+    } else if (!prox_left_contact && !prox_right_contact) {
+        if (seat_debounce > 0) seat_debounce--;
+        if (seat_debounce == 0) dock_seated = false;
+    }
+
+    // Charge-enable beacon: seated AND battery not full. Everything else is implied:
+    // undock/drag-away/fault -> not seated -> silence -> dock SSR opens in ~300ms.
+    ir_emit_active = dock_seated && (last_battery_v > 1.0f) && (last_battery_v < BATTERY_FULL_STOP);
 
     moveBase(dt);
     publishData();
@@ -350,31 +408,9 @@ void timerCallback(rcl_timer_t *timer, int64_t last_call_time)
     // Battery at 1 Hz
     EXECUTE_EVERY_N_MS(1000, publish_battery(););
 
-    // IR dock receivers — bit0=left detected, bit1=right detected.
-    // A channel is "detected" if its interrupt saw burst-packet edges recently.
-    static uint32_t prev_left_edges = 0, prev_right_edges = 0;
-    static uint32_t left_seen_ms = 0, right_seen_ms = 0;
-    uint32_t nowm = millis();
-    uint32_t le = ir_left_edges, re = ir_right_edges;
-    if (le != prev_left_edges)  { prev_left_edges  = le; left_seen_ms  = nowm; }
-    if (re != prev_right_edges) { prev_right_edges = re; right_seen_ms = nowm; }
-    uint8_t ir_left  = (le && (nowm - left_seen_ms)  < IR_DETECT_TIMEOUT_MS) ? IR_DOCK_LEFT  : 0;
-    uint8_t ir_right = (re && (nowm - right_seen_ms) < IR_DETECT_TIMEOUT_MS) ? IR_DOCK_RIGHT : 0;
-    dock_ir_msg.data = ir_left | ir_right;
-    RCSOFTCHECK(rcl_publish(&dock_ir_publisher, &dock_ir_msg, NULL));
-
-    // Per-side burst RATE (edges/sec) over the callback window — the graded alignment
-    // "heartbeat". Consumer smooths + uses (left-right) to steer, (left+right) for proximity.
-    static uint32_t rate_prev_left = 0, rate_prev_right = 0, rate_prev_ms = 0;
-    if (rate_prev_ms == 0) rate_prev_ms = nowm;
-    uint32_t rate_dt = nowm - rate_prev_ms;
-    if (rate_dt > 0) {
-        float inv = 1000.0f / (float)rate_dt;
-        dock_ir_rate_msg.data.data[0] = (float)(le - rate_prev_left)  * inv;   // left  edges/s
-        dock_ir_rate_msg.data.data[1] = (float)(re - rate_prev_right) * inv;   // right edges/s
-        rate_prev_left = le; rate_prev_right = re; rate_prev_ms = nowm;
-        RCSOFTCHECK(rcl_publish(&dock_ir_rate_publisher, &dock_ir_rate_msg, NULL));
-    }
+    // Dock contact state: bit0 = left prox, bit1 = right prox (3 = seated square).
+    dock_contact_msg.data = (prox_left_contact ? 1 : 0) | (prox_right_contact ? 2 : 0);
+    RCSOFTCHECK(rcl_publish(&dock_contact_publisher, &dock_contact_msg, NULL));
 }
 
 // ---- micro-ROS entity lifecycle ----
@@ -411,14 +447,9 @@ bool create_entities()
         "/battery/state"));
 
     CREATE_CHECK(rclc_publisher_init_default(
-        &dock_ir_publisher, &node,
+        &dock_contact_publisher, &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
-        "/dock/ir"));
-
-    CREATE_CHECK(rclc_publisher_init_default(
-        &dock_ir_rate_publisher, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "/dock/ir_rate"));
+        "/dock/contact"));
 
     CREATE_CHECK(rclc_subscription_init_default(
         &cmd_vel_subscriber, &node,
@@ -457,8 +488,7 @@ void destroy_entities()
     (void)rcl_publisher_fini(&encoder_publisher, &node);
     (void)rcl_publisher_fini(&speed_publisher,   &node);
     (void)rcl_publisher_fini(&battery_publisher, &node);
-    (void)rcl_publisher_fini(&dock_ir_publisher, &node);
-    (void)rcl_publisher_fini(&dock_ir_rate_publisher, &node);
+    (void)rcl_publisher_fini(&dock_contact_publisher, &node);
     (void)rcl_subscription_fini(&cmd_vel_subscriber,  &node);
     (void)rcl_subscription_fini(&save_imu_subscriber, &node);
     (void)rcl_timer_fini(&timer);
@@ -499,12 +529,18 @@ void setup()
     digitalWrite(ESP32_LED, LOW);
     flashLED(5);
 
-    // IR dock receivers — TSOP OUT idles HIGH, pulses LOW per demodulated burst.
-    // Pull-up holds HIGH when idle; FALLING interrupts count the burst-packet pulses.
-    pinMode(IR_RECV_LEFT,  INPUT_PULLUP);
-    pinMode(IR_RECV_RIGHT, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(IR_RECV_LEFT),  irLeftISR,  FALLING);
-    attachInterrupt(digitalPinToInterrupt(IR_RECV_RIGHT), irRightISR, FALLING);
+    // Dock proximity sensors — NPN open-collector, only sink: internal pull-ups give a
+    // defined HIGH when clear; sensor pulls LOW on metal (dock contact). Polled at 50Hz
+    // in timerCallback (slow digital signal — no interrupts needed).
+    pinMode(PROX_LEFT_PIN,  INPUT_PULLUP);
+    pinMode(PROX_RIGHT_PIN, INPUT_PULLUP);
+
+    // Dock charge-enable emitter: 38kHz carrier on LEDC, envelope task on core 0
+    // (micro-ROS owns core 1; the 600us burst timing must not fight the executor).
+    ledcSetup(IR_EMIT_LEDC_CH, 38000, 8);
+    ledcAttachPin(IR_EMIT_PIN, IR_EMIT_LEDC_CH);
+    ledcWrite(IR_EMIT_LEDC_CH, 0);
+    xTaskCreatePinnedToCore(irEmitterTask, "ir_emit", 2048, NULL, 1, NULL, 0);
 
     // Pre-allocate message data arrays once (reused across reconnects)
     encoder_msg.data.size     = 4;
@@ -514,10 +550,6 @@ void setup()
     speed_msg.data.size     = 5;
     speed_msg.data.capacity = 5;
     speed_msg.data.data     = (float_t *)malloc(5 * sizeof(float_t));
-
-    dock_ir_rate_msg.data.size     = 2;
-    dock_ir_rate_msg.data.capacity = 2;
-    dock_ir_rate_msg.data.data     = (float_t *)malloc(2 * sizeof(float_t));
 
     // Transport is set once; support/node/entities are rebuilt on each reconnect.
     set_microros_serial_transports(Serial);
