@@ -80,7 +80,7 @@ def generate_launch_description():
         Node(
             package='tf2_ros', executable='static_transform_publisher',
             name='base_link_to_base_laser',
-            arguments=['0.035', '0.0', '0.5325', '3.14159265', '0', '0', 'base_footprint', 'base_laser'],  # +17.5mm: 100mm AGV wheels
+            arguments=['0.035', '0.0', '0.518', '3.14159265', '0', '0', 'base_footprint', 'base_laser'],  # z tape-measured floor->S2E scan plane 2026-07-24 (was 0.5325 guess)
         ),
 
         # LD20 LOW lidar (LD19 profile) — /scan_low in frame ld20_laser, ~0.13 m above ground.
