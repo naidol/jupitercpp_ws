@@ -25,6 +25,7 @@ find_package(vpi REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(CURL REQUIRED)
 find_package(nlohmann_json REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
@@ -51,6 +52,7 @@ add_executable(scan_deskew_node src/scan_deskew_node.cpp)
 add_executable(dock_approach src/dock_approach.cpp)
 add_executable(dock_ir src/dock_ir.cpp)
 add_executable(dock_range src/dock_range.cpp)
+add_executable(dock_reflector src/dock_reflector.cpp)
 add_executable(webcam_publisher src/webcam_publisher.cpp)
 # Link ROS2 dependencies
 ament_target_dependencies(scan_deskew_node
@@ -63,6 +65,16 @@ ament_target_dependencies(dock_range
   rclcpp
   sensor_msgs
   std_msgs
+)
+
+ament_target_dependencies(dock_reflector
+  rclcpp
+  sensor_msgs
+  std_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
 )
 
 ament_target_dependencies(webcam_publisher
@@ -173,6 +185,7 @@ install(TARGETS
   dock_approach
   dock_ir
   dock_range
+  dock_reflector
   webcam_publisher
   DESTINATION lib/${PROJECT_NAME}
 )
