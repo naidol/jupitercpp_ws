@@ -53,6 +53,7 @@ add_executable(dock_approach src/dock_approach.cpp)
 add_executable(dock_ir src/dock_ir.cpp)
 add_executable(dock_range src/dock_range.cpp)
 add_executable(dock_reflector src/dock_reflector.cpp)
+add_executable(dock_aligner src/dock_aligner.cpp)
 add_executable(webcam_publisher src/webcam_publisher.cpp)
 # Link ROS2 dependencies
 ament_target_dependencies(scan_deskew_node
@@ -75,6 +76,14 @@ ament_target_dependencies(dock_reflector
   tf2
   tf2_ros
   tf2_geometry_msgs
+)
+
+ament_target_dependencies(dock_aligner
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  std_srvs
 )
 
 ament_target_dependencies(webcam_publisher
@@ -186,6 +195,7 @@ install(TARGETS
   dock_ir
   dock_range
   dock_reflector
+  dock_aligner
   webcam_publisher
   DESTINATION lib/${PROJECT_NAME}
 )
