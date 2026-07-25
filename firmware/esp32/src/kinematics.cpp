@@ -8,15 +8,17 @@ Kinematics::Kinematics(float wheel_radius, float wheel_separation, float wheel_b
 Kinematics::WheelSpeeds Kinematics::computeWheelSpeeds(float linear_velocity_x, float linear_velocity_y, float angular_velocity_z) {
     WheelSpeeds speeds;
 
-    // L is half the wheelbase, W is half the track width
-    float L = wheel_base_ / 2.0;
+    // W is half the track width. For a 2-wheel DIFF-DRIVE the rotation term is W (NOT L+W):
+    // v = vx +/- wz*W, so wz = (vR - vL)/wheel_separation — consistent with getDiffVelocities()
+    // odometry. The old (L+W) mecanum coefficient over-scaled rotation ~1.5x (commanded spin
+    // came out faster than requested, feeding controller overshoot). L (wheel_base) is unused
+    // in diff-drive.
     float W = wheel_separation_ / 2.0;
 
-    // Mecanum wheel speed mixing
-    speeds.motor1 = linear_velocity_x - linear_velocity_y - (angular_velocity_z * (L + W)); // Front-Left
-    speeds.motor2 = linear_velocity_x + linear_velocity_y + (angular_velocity_z * (L + W)); // Front-Right
-    speeds.motor3 = linear_velocity_x + linear_velocity_y - (angular_velocity_z * (L + W)); // Rear-Left
-    speeds.motor4 = linear_velocity_x - linear_velocity_y + (angular_velocity_z * (L + W)); // Rear-Right
+    speeds.motor1 = linear_velocity_x - linear_velocity_y - (angular_velocity_z * W); // Front-Left
+    speeds.motor2 = linear_velocity_x + linear_velocity_y + (angular_velocity_z * W); // Front-Right
+    speeds.motor3 = linear_velocity_x + linear_velocity_y - (angular_velocity_z * W); // Rear-Left
+    speeds.motor4 = linear_velocity_x - linear_velocity_y + (angular_velocity_z * W); // Rear-Right
 
     return speeds;
 }

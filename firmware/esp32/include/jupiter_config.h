@@ -72,6 +72,14 @@
 #define K_I 5.0                            // I constant
 #define K_D 0.0                            // D constant
 
+// Static-friction FEED-FORWARD (PWM units, 0..PWM_MAX). Added to the PID output in the
+// COMMANDED direction whenever a wheel is told to move, so it breaks away immediately
+// instead of waiting for the integral to crawl up to the stiction threshold — the root of
+// the multi-second reverse-breakaway lag/skew and the "one wheel arcs" in-place rotation.
+// Tune WHEELS-UP: raise until both wheels start promptly (<~0.2s) and together; lower if a
+// stop->start visibly lurches. 0 = disabled (old behaviour).
+#define MOTOR_FF_STATIC 200.0f
+
 // Per-motor trim to compensate physical motor mismatch.
 // Tune: if robot drifts right, reduce MOTOR1_TRIM. If drifts left, reduce MOTOR2_TRIM.
 // Levelled chassis reading: motor1~115 RPM, motor2~137 RPM → motor2 trim = 115/137 = 0.84
