@@ -79,6 +79,12 @@
 // Tune WHEELS-UP: raise until both wheels start promptly (<~0.2s) and together; lower if a
 // stop->start visibly lurches. 0 = disabled (old behaviour).
 #define MOTOR_FF_STATIC 200.0f
+// BREAKAWAY-ONLY gating: apply the FF kick ONLY while a wheel is essentially STALLED
+// (|rpm| < RELEASE) AND actually commanded to move meaningfully (|req_rpm| > CMD_MIN).
+// Once the wheel is rolling, FF drops out so the PID has clean fine control (a continuous
+// FF slams tiny heading corrections and made the reverse over-rotate & miss the dock).
+#define MOTOR_FF_RELEASE_RPM 4.0f    // above this the wheel is "rolling" -> no FF
+#define MOTOR_FF_CMD_MIN     3.0f    // don't kick a wheel commanded to ~zero (e.g. pivot-idle side)
 
 // Per-motor trim to compensate physical motor mismatch.
 // Tune: if robot drifts right, reduce MOTOR1_TRIM. If drifts left, reduce MOTOR2_TRIM.

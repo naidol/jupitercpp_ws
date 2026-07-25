@@ -1,33 +1,35 @@
 // Copyright 2026 Logan Naidoo <naidoo.logan@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 //
-// dock_aligner (STAGE A: REVERSE_IN) — closed-loop reverse into the charging dock.
+// dock_aligner — closed-loop SQUARE-then-REVERSE into the charging dock (Dreame-style).
 //
-// The Dreame-style plan: robot gets to a pre-dock pose roughly centred & squared to
-// the dock (~0.7 m out, rear facing it), then reverses straight in under IMU yaw-hold
-// while the internal rails do the final mm of alignment, until the rear prox sensors
-// seat. This node is STAGE A: the REVERSE_IN controller only. SQUARE (get onto the
-// dock's normal axis from an offset) and Nav2 pre-dock delivery are later stages.
+// FLOW: ACQUIRE (stable reflector lock) -> SQUARE (rotate in place at pre-dock to null
+// the dock-face heading error, with full runway) -> REVERSE_IN (reverse while keeping
+// square to the dock) -> SEATED (both prox, or partial-seat termination).
 //
-// WHY IMU yaw-hold and not reflector-skew all the way in: the continuity test
-// (2026-07-24) showed reflector SKEW is clean only while range > ~0.4 m; below ~0.35 m
-// the 250 mm strip subtends ~65 deg, the PCA line-fits a wide ARC not a line, and skew
-// balloons to a meaningless +18 deg. So heading is held by the IMU (captured at start),
-// NOT by the reflector, through the close-in. Lateral centring from the reflector is
-// available as an OPTIONAL trim in the reliable band (default OFF for the first test).
+// HEADING METRIC — nyaw, not skew: the reflector debug array carries `skew` (whether the
+// robot is on the dock's normal AXIS — a POSITION metric that in-place rotation cannot
+// change) and `bearing`. The robot's true heading-squareness to the dock FACE is the dock
+// outward-normal heading in the robot frame, nyaw = wrap(skew + bearing + pi). nyaw == 0
+// means the robot's rear axis is normal to the dock face (both rear prox will meet the
+// plates together). SQUARE and the reverse-band heading law both drive nyaw -> 0.
 //
-// SAFETY: speeds capped low (proven v_lin<=0.06, v_ang<=0.12). Aborts to a full stop if
-// the dock pose goes invalid too long or on timeout — never adventures. Publishes at
-// 20 Hz (well inside the 400 ms cmd_vel watchdog); the firmware seat-reflex (stop reverse
-// on both-prox / 1.5 s grace) is an independent backstop. Starts ONLY on an explicit
-// service call — never moves on launch.
+// WHY nyaw only while range > reflector_trust_range (~0.35 m): below that the 250 mm strip
+// subtends ~65 deg, the PCA fits a wide ARC not a line, and the angle balloons (artefact).
+// So heading comes from the reflector with runway (far), then from an IMU yaw-hold captured
+// at the trust boundary for the final close-in where the rails do the last mm.
+//
+// The skew that stranded a real dock (2026-07-25: right prox seated, left open) came from
+// reversing with an imperfect heading and no runway to fix it near the seat. Squaring first
+// + holding square to the dock through the approach removes that.
+//
+// SAFETY: low speed caps; publishes 20 Hz (inside the 400 ms watchdog); firmware seat-reflex
+// is an independent backstop; aborts to a stop on lost pose / timeout; never moves on launch
+// (service-triggered). `square_only:=true` does SQUARE then stops — use it to verify the
+// rotation sign safely (pure in-place rotation cannot collide) before ever reversing.
 //
 // START:  ros2 service call /dock/align_start  std_srvs/srv/Trigger
 // CANCEL: ros2 service call /dock/align_cancel std_srvs/srv/Trigger
-//
-// Subscribes: /dock/reflector (Float32MultiArray, from dock_reflector),
-//             /imu/data (sensor_msgs/Imu, yaw source), /dock/contact (UInt8 prox bitmask).
-// Publishes:  /cmd_vel (Twist), /dock/aligner_state (String).
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
@@ -46,6 +48,7 @@ namespace {
 constexpr int D_VALID   = 0;
 constexpr int D_LATERAL = 2;
 constexpr int D_RANGE   = 3;
+constexpr int D_BEARING = 4;
 constexpr int D_SKEW    = 5;
 
 double wrap_pi(double a) { return std::atan2(std::sin(a), std::cos(a)); }
@@ -62,18 +65,38 @@ public:
     state_topic_     = declare_parameter<std::string>("state_topic",     "/dock/aligner_state");
 
     control_hz_       = declare_parameter("control_hz",        20.0);
-    v_reverse_        = declare_parameter("v_reverse",         0.05);   // m/s, proven-slow
-    kp_yaw_           = declare_parameter("kp_yaw",            0.8);    // rad/s per rad heading error
-    max_angular_      = declare_parameter("max_angular",       0.12);   // rad/s cap (user-proven)
-    lateral_gain_     = declare_parameter("lateral_gain",      0.0);    // OFF for v1; enable after basic reverse confirmed
-    lateral_trust_range_ = declare_parameter("lateral_trust_range", 0.40); // m — reflector lateral only trusted beyond this
-    max_lateral_corr_ = declare_parameter("max_lateral_corr",  0.05);   // rad/s clamp on the lateral trim term
-    seat_contact_mask_= declare_parameter("seat_contact_mask", 3);      // both prox = seated
-    seat_range_floor_ = declare_parameter("seat_range_floor",  0.15);   // m — secondary stop if contact never arrives
-    invalid_abort_s_  = declare_parameter("invalid_abort_s",   1.0);    // s of invalid pose -> abort
-    acquire_stable_s_ = declare_parameter("acquire_stable_s",  0.5);    // s of continuous valid pose before moving
-    acquire_timeout_s_= declare_parameter("acquire_timeout_s", 10.0);   // s to get a lock -> abort
-    overall_timeout_s_= declare_parameter("overall_timeout_s", 60.0);   // s cap on the whole reverse
+    v_reverse_        = declare_parameter("v_reverse",         0.05);   // m/s
+    max_angular_      = declare_parameter("max_angular",       0.25);   // rad/s cap
+
+    // Heading (dock-face squareness) control from the reflector, used in SQUARE and in the
+    // far band of REVERSE_IN. heading_sign flips the rotation direction (verify with
+    // square_only:=true if unsure): az = clamp(heading_sign * kp_heading * nyaw).
+    kp_heading_       = declare_parameter("kp_heading",        1.2);
+    heading_sign_     = declare_parameter("heading_sign",      1.0);
+    square_tol_       = declare_parameter("square_tol_deg",    2.0) * M_PI / 180.0;
+    square_settle_s_  = declare_parameter("square_settle_s",   0.5);
+    square_timeout_s_ = declare_parameter("square_timeout_s",  20.0);
+    square_only_      = declare_parameter("square_only",       false); // SQUARE then stop (sign check)
+
+    // Below this range the reflector angle is unreliable -> hold IMU yaw instead.
+    reflector_trust_range_ = declare_parameter("reflector_trust_range", 0.35);
+    kp_yaw_           = declare_parameter("kp_yaw",            0.8);    // IMU yaw-hold gain (close-in)
+
+    // Optional lateral centring trim (default OFF; sign unverified).
+    lateral_gain_     = declare_parameter("lateral_gain",      0.0);
+    max_lateral_corr_ = declare_parameter("max_lateral_corr",  0.05);
+
+    seat_contact_mask_= declare_parameter("seat_contact_mask", 3);      // both prox
+    seat_zone_        = declare_parameter("seat_zone",         0.30);   // m — only seat-terminate this close
+    seat_settle_s_    = declare_parameter("seat_settle_s",     2.0);    // s of no-progress + contact -> seated
+    stuck_abort_s_    = declare_parameter("stuck_abort_s",     4.0);    // s of no-progress + NO contact near seat -> abort (jammed skewed)
+    stall_eps_        = declare_parameter("stall_eps",         0.008);  // m — progress smaller than this = stalled
+    seat_range_floor_ = declare_parameter("seat_range_floor",  0.15);   // m — hard stop even with no contact
+
+    invalid_abort_s_  = declare_parameter("invalid_abort_s",   1.0);
+    acquire_stable_s_ = declare_parameter("acquire_stable_s",  0.5);
+    acquire_timeout_s_= declare_parameter("acquire_timeout_s", 10.0);
+    overall_timeout_s_= declare_parameter("overall_timeout_s", 90.0);
 
     cmd_pub_   = create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
     state_pub_ = create_publisher<std_msgs::msg::String>(state_topic_, rclcpp::QoS(1).transient_local());
@@ -96,16 +119,17 @@ public:
 
     set_state(IDLE);
     RCLCPP_INFO(get_logger(),
-      "dock_aligner (Stage A reverse-in) ready. v_rev=%.2f kp_yaw=%.2f max_ang=%.2f lat_gain=%.2f. "
-      "Call /dock/align_start to begin.", v_reverse_, kp_yaw_, max_angular_, lateral_gain_);
+      "dock_aligner ready. v_rev=%.2f max_ang=%.2f kp_head=%.2f(sign %+.0f) square_tol=%.1fdeg "
+      "trust_range=%.2f square_only=%d. Call /dock/align_start.",
+      v_reverse_, max_angular_, kp_heading_, heading_sign_, square_tol_*180.0/M_PI,
+      reflector_trust_range_, square_only_ ? 1 : 0);
   }
 
 private:
-  enum State { IDLE, ACQUIRE, REVERSE_IN, SEATED, ABORT };
+  enum State { IDLE, ACQUIRE, SQUARE, REVERSE_IN, SEATED, ABORT };
   const char* state_name(State s) const {
-    switch (s) { case IDLE: return "IDLE"; case ACQUIRE: return "ACQUIRE";
-                 case REVERSE_IN: return "REVERSE_IN"; case SEATED: return "SEATED";
-                 default: return "ABORT"; }
+    switch (s) { case IDLE: return "IDLE"; case ACQUIRE: return "ACQUIRE"; case SQUARE: return "SQUARE";
+                 case REVERSE_IN: return "REVERSE_IN"; case SEATED: return "SEATED"; default: return "ABORT"; }
   }
   void set_state(State s) {
     state_ = s;
@@ -119,29 +143,25 @@ private:
     refl_valid_   = (m->data[D_VALID] > 0.5f);
     refl_lateral_ = m->data[D_LATERAL];
     refl_range_   = m->data[D_RANGE];
-    refl_skew_    = m->data[D_SKEW];
+    const double bearing = m->data[D_BEARING];
+    const double skew    = m->data[D_SKEW];
+    refl_nyaw_    = wrap_pi(skew + bearing + M_PI);   // dock-face heading error (0 = square)
     last_refl_time_ = now();
     if (refl_valid_) last_valid_refl_time_ = last_refl_time_;
   }
   void on_imu(const sensor_msgs::msg::Imu::SharedPtr m) {
     const auto& q = m->orientation;
-    // yaw from quaternion (z-axis rotation)
-    yaw_ = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
-                      1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    yaw_ = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
     have_imu_ = true;
   }
   void on_contact(const std_msgs::msg::UInt8::SharedPtr m) { contact_mask_ = m->data; }
 
   void on_start(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                 std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    if (state_ == REVERSE_IN || state_ == ACQUIRE) {
-      res->success = false; res->message = "already running";
-      return;
+    if (state_ == ACQUIRE || state_ == SQUARE || state_ == REVERSE_IN) {
+      res->success = false; res->message = "already running"; return;
     }
-    if (!have_imu_) {
-      res->success = false; res->message = "no IMU yet — is the micro-ROS agent up?";
-      return;
-    }
+    if (!have_imu_) { res->success = false; res->message = "no IMU yet — micro-ROS agent up?"; return; }
     acquire_start_ = now();
     valid_since_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
     set_state(ACQUIRE);
@@ -149,14 +169,17 @@ private:
   }
   void on_cancel(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                  std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    abort_reason_ = "cancelled by service";
-    set_state(ABORT);
+    abort_reason_ = "cancelled by service"; set_state(ABORT);
     res->success = true; res->message = "aborting -> stop";
   }
 
-  void publish_stop() {
-    geometry_msgs::msg::Twist z;   // all-zero
-    cmd_pub_->publish(z);
+  void publish_stop() { cmd_pub_->publish(geometry_msgs::msg::Twist{}); }
+  bool have_refl() const {
+    return last_refl_time_.nanoseconds() != 0 && (now() - last_refl_time_).seconds() < 0.5;
+  }
+  // Heading command to null the dock-face error (used in SQUARE and the reverse far-band).
+  double heading_cmd() const {
+    return clampd(heading_sign_ * kp_heading_ * refl_nyaw_, -max_angular_, max_angular_);
   }
 
   void on_tick() {
@@ -165,98 +188,136 @@ private:
       case IDLE:
       case SEATED:
       case ABORT:
-        // Hold still. Publishing zero keeps the base braked and the watchdog fed.
         publish_stop();
         return;
 
       case ACQUIRE: {
-        const bool refl_fresh = have_refl() && refl_valid_;
-        if (!refl_fresh) {
-          valid_since_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-        } else if (valid_since_.nanoseconds() == 0) {
-          valid_since_ = t;
-        }
-        publish_stop();   // do NOT move until locked
-        if (valid_since_.nanoseconds() != 0 &&
-            (t - valid_since_).seconds() >= acquire_stable_s_) {
-          target_yaw_ = yaw_;              // capture heading to hold through the reverse
-          motion_start_ = t;
-          set_state(REVERSE_IN);
-          RCLCPP_INFO(get_logger(), "locked: range %.3f m, lateral %+.3f m. Holding yaw %.1f deg, reversing in.",
-                      refl_range_, refl_lateral_, target_yaw_ * 180.0 / M_PI);
+        const bool fresh = have_refl() && refl_valid_;
+        if (!fresh) valid_since_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        else if (valid_since_.nanoseconds() == 0) valid_since_ = t;
+        publish_stop();
+        if (valid_since_.nanoseconds() != 0 && (t - valid_since_).seconds() >= acquire_stable_s_) {
+          square_ok_since_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+          set_state(SQUARE);
+          RCLCPP_INFO(get_logger(), "locked: range %.3f lateral %+.3f nyaw %+.1f deg -> squaring.",
+                      refl_range_, refl_lateral_, refl_nyaw_ * 180.0 / M_PI);
         } else if ((t - acquire_start_).seconds() > acquire_timeout_s_) {
-          abort_reason_ = "no stable dock lock within acquire timeout";
-          set_state(ABORT);
+          abort_reason_ = "no stable dock lock"; set_state(ABORT);
+        }
+        return;
+      }
+
+      case SQUARE: {
+        if ((t - last_valid_refl_time_).seconds() > invalid_abort_s_) {
+          abort_reason_ = "pose invalid during square"; set_state(ABORT); publish_stop(); return;
+        }
+        // Rotate in place to null the dock-face heading error. No linear motion = full runway,
+        // no collision risk (this is also what square_only tests for sign).
+        geometry_msgs::msg::Twist cmd;
+        cmd.linear.x = 0.0;
+        cmd.angular.z = heading_cmd();
+        cmd_pub_->publish(cmd);
+
+        const bool squared = std::fabs(refl_nyaw_) <= square_tol_;
+        if (!squared) square_ok_since_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        else if (square_ok_since_.nanoseconds() == 0) square_ok_since_ = t;
+
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
+          "SQUARE: nyaw %+.1f deg | az %+.2f | range %.3f%s",
+          refl_nyaw_ * 180.0 / M_PI, cmd.angular.z, refl_range_, squared ? "  [in tol]" : "");
+
+        if (square_ok_since_.nanoseconds() != 0 && (t - square_ok_since_).seconds() >= square_settle_s_) {
+          if (square_only_) { RCLCPP_INFO(get_logger(), "square_only: squared, stopping."); set_state(SEATED); publish_stop(); return; }
+          best_range_ = 1e9; best_range_time_ = t; imu_hold_active_ = false;
+          motion_start_ = t; set_state(REVERSE_IN);
+          RCLCPP_INFO(get_logger(), "squared (nyaw %+.1f deg) — reversing in.", refl_nyaw_ * 180.0 / M_PI);
+        } else if ((t - acquire_start_).seconds() > square_timeout_s_) {
+          abort_reason_ = "square did not converge (check heading_sign?)"; set_state(ABORT); publish_stop();
         }
         return;
       }
 
       case REVERSE_IN: {
-        // --- termination checks (in priority order) ---
+        // --- terminations ---
         if ((contact_mask_ & 0x03) == seat_contact_mask_) {
-          RCLCPP_INFO(get_logger(), "both prox seated (contact=%u) — stop.", contact_mask_);
+          RCLCPP_INFO(get_logger(), "both prox seated (contact=%u).", contact_mask_);
           set_state(SEATED); publish_stop(); return;
         }
         if (have_refl() && refl_valid_ && refl_range_ > 0.0 && refl_range_ < seat_range_floor_) {
-          RCLCPP_WARN(get_logger(), "range %.3f m below floor with no both-prox — stopping (rails/firmware take over).",
-                      refl_range_);
+          RCLCPP_WARN(get_logger(), "range %.3f below floor — stop (rails/firmware take over).", refl_range_);
           set_state(SEATED); publish_stop(); return;
         }
-        if ((t - last_valid_refl_time_).seconds() > invalid_abort_s_) {
-          abort_reason_ = "dock pose invalid too long";
+        // Partial-seat / stall termination: in the seat zone, touching at least one prox, and no
+        // further progress for seat_settle_s -> stop (don't grind against the dock).
+        if (refl_range_ < best_range_ - stall_eps_) { best_range_ = refl_range_; best_range_time_ = t; }
+        if (refl_range_ < seat_zone_ && (contact_mask_ & 0x03) != 0 &&
+            (t - best_range_time_).seconds() > seat_settle_s_) {
+          RCLCPP_WARN(get_logger(), "seated but not squared: contact=%u, no progress %.1fs at range %.3f "
+                      "(left=%d right=%d). Stopping.", contact_mask_, seat_settle_s_, refl_range_,
+                      (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0);
+          set_state(SEATED); publish_stop(); return;
+        }
+        // Jammed near the seat but NO prox engaged (arrived too skewed) — don't grind; abort.
+        if (refl_range_ < seat_zone_ && (contact_mask_ & 0x03) == 0 &&
+            (t - best_range_time_).seconds() > stuck_abort_s_) {
+          abort_reason_ = "stuck near seat with no prox contact (arrived skewed)";
+          RCLCPP_WARN(get_logger(), "jammed at range %.3f, no prox, no progress %.1fs — abort.",
+                      refl_range_, stuck_abort_s_);
           set_state(ABORT); publish_stop(); return;
+        }
+        if ((t - last_valid_refl_time_).seconds() > invalid_abort_s_) {
+          abort_reason_ = "dock pose invalid too long"; set_state(ABORT); publish_stop(); return;
         }
         if ((t - motion_start_).seconds() > overall_timeout_s_) {
-          abort_reason_ = "overall reverse timeout";
-          set_state(ABORT); publish_stop(); return;
+          abort_reason_ = "overall reverse timeout"; set_state(ABORT); publish_stop(); return;
         }
 
-        // --- control law: reverse holding captured IMU yaw (+ optional lateral trim) ---
-        const double yaw_err = wrap_pi(target_yaw_ - yaw_);
-        double angular = kp_yaw_ * yaw_err;
-
-        // Optional lateral centring, ONLY in the reflector's reliable band. Default OFF
-        // (lateral_gain 0). SIGN IS UNVERIFIED — confirm empirically before enabling:
-        // reversing, dock behind; if dock lateral is +y (left), the rear must swing +y.
-        if (lateral_gain_ > 0.0 && refl_valid_ && refl_range_ > lateral_trust_range_) {
-          const double lat_term = clampd(lateral_gain_ * refl_lateral_,
-                                          -max_lateral_corr_, max_lateral_corr_);
-          angular += lat_term;
+        // --- heading law: reflector nyaw with runway (far), IMU-hold for the close-in ---
+        double angular;
+        if (refl_valid_ && refl_range_ > reflector_trust_range_) {
+          angular = heading_cmd();                       // keep squaring to the dock
+          imu_hold_active_ = false;                      // re-arm the hold capture
+        } else {
+          if (!imu_hold_active_) { imu_hold_yaw_ = yaw_; imu_hold_active_ = true; } // capture at boundary
+          angular = clampd(kp_yaw_ * wrap_pi(imu_hold_yaw_ - yaw_), -max_angular_, max_angular_);
         }
-
-        angular = clampd(angular, -max_angular_, max_angular_);
+        // optional lateral trim (default off)
+        if (lateral_gain_ > 0.0 && refl_valid_ && refl_range_ > reflector_trust_range_) {
+          angular = clampd(angular + clampd(lateral_gain_ * refl_lateral_, -max_lateral_corr_, max_lateral_corr_),
+                           -max_angular_, max_angular_);
+        }
 
         geometry_msgs::msg::Twist cmd;
-        cmd.linear.x  = -v_reverse_;   // negative = reverse, caster-first into the dock
+        cmd.linear.x = -v_reverse_;
         cmd.angular.z = angular;
         cmd_pub_->publish(cmd);
 
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
-          "REVERSE_IN: range %.3f | lat %+.3f | yaw_err %+.1f deg | ang %+.2f | contact %u",
-          refl_range_, refl_lateral_, yaw_err * 180.0 / M_PI, angular, contact_mask_);
+          "REVERSE_IN: range %.3f | nyaw %+.1f | lat %+.3f | az %+.2f | %s | contact %u",
+          refl_range_, refl_nyaw_ * 180.0 / M_PI, refl_lateral_, angular,
+          imu_hold_active_ ? "IMU-hold" : "refl-square", contact_mask_);
         return;
       }
     }
   }
 
-  bool have_refl() const {
-    return last_refl_time_.nanoseconds() != 0 && (now() - last_refl_time_).seconds() < 0.5;
-  }
-
   // params
   std::string reflector_topic_, imu_topic_, contact_topic_, cmd_vel_topic_, state_topic_;
-  double control_hz_, v_reverse_, kp_yaw_, max_angular_, lateral_gain_, lateral_trust_range_,
-         max_lateral_corr_, seat_range_floor_, invalid_abort_s_, acquire_stable_s_,
-         acquire_timeout_s_, overall_timeout_s_;
+  double control_hz_, v_reverse_, max_angular_, kp_heading_, heading_sign_, square_tol_,
+         square_settle_s_, square_timeout_s_, reflector_trust_range_, kp_yaw_, lateral_gain_,
+         max_lateral_corr_, seat_zone_, seat_settle_s_, stuck_abort_s_, stall_eps_, seat_range_floor_,
+         invalid_abort_s_, acquire_stable_s_, acquire_timeout_s_, overall_timeout_s_;
+  bool square_only_;
   int seat_contact_mask_;
 
-  // live inputs
-  bool   refl_valid_{false}, have_imu_{false};
-  double refl_lateral_{0}, refl_range_{0}, refl_skew_{0}, yaw_{0}, target_yaw_{0};
+  // live inputs / state
+  bool   refl_valid_{false}, have_imu_{false}, imu_hold_active_{false};
+  double refl_lateral_{0}, refl_range_{0}, refl_nyaw_{0}, yaw_{0}, imu_hold_yaw_{0}, best_range_{1e9};
   uint8_t contact_mask_{0};
   rclcpp::Time last_refl_time_{0,0,RCL_ROS_TIME}, last_valid_refl_time_{0,0,RCL_ROS_TIME};
-  rclcpp::Time acquire_start_{0,0,RCL_ROS_TIME}, valid_since_{0,0,RCL_ROS_TIME}, motion_start_{0,0,RCL_ROS_TIME};
-
+  rclcpp::Time acquire_start_{0,0,RCL_ROS_TIME}, valid_since_{0,0,RCL_ROS_TIME},
+               square_ok_since_{0,0,RCL_ROS_TIME}, motion_start_{0,0,RCL_ROS_TIME},
+               best_range_time_{0,0,RCL_ROS_TIME};
   State state_{IDLE};
   std::string abort_reason_;
 

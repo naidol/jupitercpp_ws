@@ -318,12 +318,15 @@ void moveBase(float dt)
     } else if (USE_PID == true) {
         target_rpm1 = motor1_pid.compute(req_rpm.motor1, current_rpm1, dt);
         target_rpm2 = motor2_pid.compute(req_rpm.motor2, current_rpm2, dt);
-        // Static-friction feed-forward: pre-load each wheel toward breakaway in its OWN
-        // commanded direction (opposite signs during a spin) so both start at once instead
-        // of the strong wheel leading and the robot arcing. PID trims around it; setSpeed
-        // clamps to PWM range.
-        if (req_rpm.motor1 != 0.0f) target_rpm1 += copysignf(MOTOR_FF_STATIC, req_rpm.motor1);
-        if (req_rpm.motor2 != 0.0f) target_rpm2 += copysignf(MOTOR_FF_STATIC, req_rpm.motor2);
+        // Breakaway-ONLY static feed-forward: kick a wheel toward motion ONLY while it is
+        // stalled AND meaningfully commanded — assists the initial breakaway (both wheels
+        // start together, no arc) then gets out of the way once rolling so the PID does clean
+        // fine steering. A continuous kick slammed tiny reverse heading corrections and made
+        // the robot over-rotate off the dock.
+        if (fabsf(req_rpm.motor1) > MOTOR_FF_CMD_MIN && fabsf(current_rpm1) < MOTOR_FF_RELEASE_RPM)
+            target_rpm1 += copysignf(MOTOR_FF_STATIC, req_rpm.motor1);
+        if (fabsf(req_rpm.motor2) > MOTOR_FF_CMD_MIN && fabsf(current_rpm2) < MOTOR_FF_RELEASE_RPM)
+            target_rpm2 += copysignf(MOTOR_FF_STATIC, req_rpm.motor2);
         target_rpm3 = 0.0f;
         target_rpm4 = 0.0f;
     } else {
