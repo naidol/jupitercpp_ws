@@ -1,48 +1,49 @@
 #include "motor.h"
 #include "esp32-hal-ledc.h"
 
-// Constructor to initialize the motor with PWM and DIR pins
-Motor::Motor(uint8_t pwm_pin, uint8_t dir_pin, uint8_t pwm_channel, uint32_t pwm_frequency, uint8_t pwm_resolution)
-    : pwm_pin_(pwm_pin), dir_pin_(dir_pin), pwm_channel_(pwm_channel),
+// Constructor to initialize the motor with PWM and DIR pins.
+// Both bridge inputs are driven by their own LEDC channel (see setSpeed for why).
+Motor::Motor(uint8_t pwm_pin, uint8_t dir_pin, uint8_t pwm_channel, uint8_t dir_channel,
+             uint32_t pwm_frequency, uint8_t pwm_resolution)
+    : pwm_pin_(pwm_pin), dir_pin_(dir_pin), pwm_channel_(pwm_channel), dir_channel_(dir_channel),
       pwm_frequency_(pwm_frequency), pwm_resolution_(pwm_resolution) {
-    
-    // Initialize the DIR pin as output
-    pinMode(dir_pin_, OUTPUT);
 
-    // Initialize PWM using the specified parameters
+    // Attach a LEDC channel to EACH bridge input. dir_pin is no longer a plain GPIO —
+    // it is PWM'd during reverse, so it must be LEDC-driven (and held HIGH via full duty
+    // when it needs to be a constant level).
     ledcSetup(pwm_channel_, pwm_frequency_, pwm_resolution_);
-
-    // Attach the PWM channel to the specified PWM pin
     ledcAttachPin(pwm_pin_, pwm_channel_);
+    ledcSetup(dir_channel_, pwm_frequency_, pwm_resolution_);
+    ledcAttachPin(dir_pin_, dir_channel_);
 }
 
-// Function to set motor speed and direction
+// Set motor speed + direction. IN/IN H-bridge truth table:
+//   (dir=H, pwm=L)=forward drive   (dir=L, pwm=H)=reverse drive
+//   (H,H)=BRAKE (fast decay)       (L,L)=COAST (freewheel)
+//
+// FAST-DECAY (brake-mode) in a direction = PWM between that drive state and BRAKE,
+// holding the OTHER input HIGH. Forward holds dir HIGH and PWMs pwm; reverse holds pwm
+// HIGH and PWMs dir. Previously reverse held dir LOW and PWM'd pwm -> it alternated
+// drive with COAST (slow decay) = electrically weak, which caused the multi-second
+// reverse-breakaway stall and the lurch. Now reverse mirrors forward. (2026-07-25)
 void Motor::setSpeed(int speed) {
     if (speed == 0) {
-        // BRAKE, not coast. IN/IN bridge: both pins HIGH = brake (slow decay), both LOW = coast.
-        // Restores the ORIGINAL instant-stop behaviour (wheels froze mid-air on cmd_vel=0). The
-        // previous "PWM 0 + dir LOW" = both-LOW = FREEWHEEL, which crept in and caused coast-past
-        // stops, heading overshoot and oscillation. (fixed 2026-07-11)
-        digitalWrite(dir_pin_, HIGH);
+        // BRAKE (instant stop): both inputs HIGH.
+        ledcWrite(dir_channel_, PWM_MAX);
         ledcWrite(pwm_channel_, PWM_MAX);
     }
     else if (speed > 0) {
-        // Set direction to forward
-        digitalWrite(dir_pin_, HIGH);
-        // Set the PWM duty cycle
-        int duty_cycle = constrain(speed, PWM_FWD_MIN, PWM_MAX);  // min power needed for forward motion adjust PWM_FWD_MIN in jupiter_config
-        // Invert the pwm duty cycle
-        duty_cycle = PWM_MAX - duty_cycle;      // 0 - 255 means 255 - 0 that is HIGH PWM duty means lower speed
-        ledcWrite(pwm_channel_, duty_cycle);  
-        // ledcWrite(pwm_channel_, PWM_MAX - speed);
-    } 
+        // FORWARD, fast decay: dir HIGH, PWM pwm_pin. Low fraction = drive, so a larger
+        // magnitude writes a smaller duty (more time in the drive state).
+        int mag = constrain(speed, PWM_FWD_MIN, PWM_MAX);
+        ledcWrite(dir_channel_, PWM_MAX);        // constant HIGH
+        ledcWrite(pwm_channel_, PWM_MAX - mag);  // toggles LOW(drive) <-> HIGH(brake)
+    }
     else {
-        // Set direction to reverse
-        digitalWrite(dir_pin_, LOW);
-        int duty_cycle = constrain(-speed, PWM_REV_MIN, PWM_MAX);  // min power needed for reverse motion adjust PWM_REV_MIN in jupiter_config
-        // Dont Invert the pwm duty cycle
-        ledcWrite(pwm_channel_, duty_cycle);
-        // ledcWrite(pwm_channel_, -speed); 
+        // REVERSE, fast decay (brake-mode): pwm HIGH, PWM dir_pin. Mirror of forward.
+        int mag = constrain(-speed, PWM_REV_MIN, PWM_MAX);
+        ledcWrite(pwm_channel_, PWM_MAX);        // constant HIGH
+        ledcWrite(dir_channel_, PWM_MAX - mag);  // toggles LOW(drive) <-> HIGH(brake)
     }
 }
 

@@ -26,25 +26,37 @@ PID::PID(float min_val, float max_val, float kp, float ki, float kd):
 
 double PID::compute(float setpoint, float measured_value, float dt)
 {
-    double error;
-    double pid;
+    double error = setpoint - measured_value;
+    derivative_ = (error - prev_error_) / dt;
 
-    //setpoint is constrained between min and max to prevent pid from having too much error
-    error = setpoint - measured_value;
-    integral_ += error * dt;
-    derivative_ = (error - prev_error_)/dt;
+    // Tentative integral step (only committed below if it won't wind up).
+    double integral_candidate = integral_ + error * dt;
 
     if(setpoint == 0 && error == 0)
     {
-        integral_ = 0;
+        integral_candidate = 0;
         derivative_ = 0;
     }
 
-    pid = (kp_ * error) + (ki_ * integral_) + (kd_ * derivative_);
-    prev_error_ = error;
+    double pid = (kp_ * error) + (ki_ * integral_candidate) + (kd_ * derivative_);
 
-    return constrain(pid, min_val_, max_val_);
-    
+    // ANTI-WINDUP (conditional integration): when the output is saturated, only commit
+    // the integral if the current error would pull the output BACK toward the linear
+    // range (i.e. let it unwind, never grow). This stops the integral accumulating while
+    // a wheel is stalled/blocked — the cause of the multi-second reverse-breakaway lurch
+    // (integral wound up for ~13 s, then dumped on breakaway). (2026-07-25)
+    if (pid > max_val_) {
+        pid = max_val_;
+        if (error < 0) integral_ = integral_candidate;   // unwinding only
+    } else if (pid < min_val_) {
+        pid = min_val_;
+        if (error > 0) integral_ = integral_candidate;   // unwinding only
+    } else {
+        integral_ = integral_candidate;                  // in range: accumulate normally
+    }
+
+    prev_error_ = error;
+    return pid;
 }
 
 void PID::updateConstants(float kp, float ki, float kd)

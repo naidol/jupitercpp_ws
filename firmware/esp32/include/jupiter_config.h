@@ -36,6 +36,10 @@
 #define PROX_LEFT_PIN   13      // rear-left  (was MOTOR3_ENC_A / IR_RECV_LEFT)
 #define PROX_RIGHT_PIN  15      // rear-right (was MOTOR4_ENC_B / IR_RECV_RIGHT)
 #define PROX_DEBOUNCE_CYCLES 5  // timer cycles (20ms each) both-LOW before "seated" latches (and clear before it drops)
+// Seat grace: after the FIRST sensor makes contact, keep easing in for this long so the guide
+// rails can square the robot and the SECOND sensor can engage. Stop immediately if both engage.
+// Bounded so a permanently-missing second sensor can never grind the robot into the dock.
+#define CONTACT_SEAT_GRACE_MS 1500
 
 // Dock charge-enable IR EMITTER: TSAL6400 + 220R on GPIO4 (freed MOTOR4_ENC_A pin).
 // 38kHz carrier (LEDC) gated in short-burst packets (TSOP-AGC-friendly — same envelope

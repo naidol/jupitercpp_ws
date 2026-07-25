@@ -119,9 +119,10 @@ void irEmitterTask(void *arg)
 // ---- Dock contact + charge state (updated each timer cycle) ----
 bool prox_left_contact  = false;
 bool prox_right_contact = false;
-bool dock_seated        = false;   // debounced both-sensors latch
-static uint8_t seat_debounce = 0;
-static float   last_battery_v = 0.0f;
+bool dock_seated        = false;   // debounced both-sensors latch (gates the charge beacon)
+static uint8_t  seat_debounce    = 0;
+static float    last_battery_v   = 0.0f;
+static uint32_t first_contact_ms = 0;   // millis() at FIRST sensor contact; 0 = nothing touching
 
 // ---- cmd_vel watchdog ----
 volatile unsigned long last_cmd_vel_ms = 0;
@@ -148,10 +149,12 @@ static uint8_t bat_ma_count = 0;
 static float   bat_ma_sum   = 0.0f;
 
 // ---- Hardware instances ----
-Motor motor1(MOTOR1_PWM, MOTOR1_DIR, 0, PWM_FREQUENCY, PWM_BITS);
-Motor motor2(MOTOR2_PWM, MOTOR2_DIR, 1, PWM_FREQUENCY, PWM_BITS);
-Motor motor3(MOTOR3_PWM, MOTOR3_DIR, 2, PWM_FREQUENCY, PWM_BITS);
-Motor motor4(MOTOR4_PWM, MOTOR4_DIR, 3, PWM_FREQUENCY, PWM_BITS);
+// Each motor now takes TWO LEDC channels: pwm-pin channel (0-3) + dir-pin channel (8-11),
+// so reverse can PWM the dir pin for fast-decay (brake-mode) drive. IR emitter stays on ch 4.
+Motor motor1(MOTOR1_PWM, MOTOR1_DIR, 0, 8,  PWM_FREQUENCY, PWM_BITS);
+Motor motor2(MOTOR2_PWM, MOTOR2_DIR, 1, 9,  PWM_FREQUENCY, PWM_BITS);
+Motor motor3(MOTOR3_PWM, MOTOR3_DIR, 2, 10, PWM_FREQUENCY, PWM_BITS);
+Motor motor4(MOTOR4_PWM, MOTOR4_DIR, 3, 11, PWM_FREQUENCY, PWM_BITS);
 
 Encoder motor1_encoder(MOTOR1_ENC_A, MOTOR1_ENC_B, COUNTS_PER_REV1);
 Encoder motor2_encoder(MOTOR2_ENC_A, MOTOR2_ENC_B, COUNTS_PER_REV2);
@@ -275,7 +278,16 @@ void moveBase(float dt)
     // Prox REFLEX (endstop-style): any dock contact blocks further REVERSE drive instantly;
     // when fully seated also block rotation (no grinding against the dock). FORWARD stays
     // allowed always — that's how the robot undocks.
-    if ((prox_left_contact || prox_right_contact) && target_linear_velocity < 0) {
+    // SEAT REFLEX. Stopping on the FIRST sensor was wrong: on a slightly skewed entry the near
+    // sensor trips, reverse halts, and the far sensor can then NEVER close its gap — the robot
+    // parks forever at one-sensor, dock_seated never latches, charging never starts.
+    // Instead: keep easing in after first contact so the guide rails finish squaring the robot,
+    // and stop when BOTH sensors confirm (immediate, undebounced) — or when the grace window
+    // expires, so a sensor that never engages can't grind us into the dock indefinitely.
+    const bool both_contact = prox_left_contact && prox_right_contact;
+    const bool seat_grace_expired =
+        (first_contact_ms != 0) && (millis() - first_contact_ms > CONTACT_SEAT_GRACE_MS);
+    if ((both_contact || seat_grace_expired) && target_linear_velocity < 0) {
         target_linear_velocity = 0;
     }
     if (dock_seated) {
@@ -390,6 +402,13 @@ void timerCallback(rcl_timer_t *timer, int64_t last_call_time)
     } else if (!prox_left_contact && !prox_right_contact) {
         if (seat_debounce > 0) seat_debounce--;
         if (seat_debounce == 0) dock_seated = false;
+    }
+
+    // Seat-grace timer: starts at the FIRST sensor contact, clears when nothing is touching.
+    if (prox_left_contact || prox_right_contact) {
+        if (first_contact_ms == 0) first_contact_ms = millis();
+    } else {
+        first_contact_ms = 0;
     }
 
     // Charge-enable beacon: seated AND battery not full. Everything else is implied:
