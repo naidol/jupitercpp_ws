@@ -46,19 +46,23 @@ float Encoder::getRPM() {
     unsigned long current_time = millis();
     unsigned long time_elapsed = current_time - last_time_;
 
-    // Calculate RPM if time has passed
-    if (time_elapsed > 100) {  // At least 100ms has passed
-        float rpm = calculateRPM();
+    // Recompute at most every ~100ms (need enough counts for a stable RPM). BETWEEN updates,
+    // HOLD and return the last computed value — do NOT return 0.0. The control loop calls this
+    // at ~20-26Hz, far faster than 10Hz, so returning 0.0 on the in-between calls told the PID
+    // and odom the wheel was STALLED when it was spinning fine. That made the PID over-drive
+    // (~loop_rate/10Hz ≈ 2.6x too fast) and odom under-report by the same factor. (fixed 2026-07-27)
+    if (time_elapsed > 100) {
+        last_rpm_ = calculateRPM();
         last_time_ = current_time;
         last_count_ = count_;  // Update the last count for the next RPM calculation
-        return rpm;
     }
-    return 0.0;  // No significant time passed to calculate RPM
+    return last_rpm_;
 }
 
 void Encoder::reset() {
     count_ = 0;
     last_count_ = 0;
+    last_rpm_ = 0.0f;
 }
 
 // Static ISR functions for the four encoders

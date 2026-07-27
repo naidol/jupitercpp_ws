@@ -47,15 +47,26 @@ void setup_imu(sensor_msgs__msg__Imu* imu_msg) {
         
         bno.setMode(OPERATION_MODE_CONFIG);
         delay(50);
-        bno.setSensorOffsets(calibData);
+        bno.setSensorOffsets(calibData);   // restores gyro/accel offsets (mag offsets ignored in IMUPLUS)
         delay(50);
-        bno.setMode(OPERATION_MODE_NDOF);
+        // IMUPLUS = gyro+accel fusion, magnetometer OUT of the loop. NDOF's live-magnetometer
+        // fusion was being corrupted by the drive-motor magnetic fields -> erratic/inflated
+        // heading (proven 2026-07-25: BNO read 2-3x the yaw of two magnet-immune sensors).
+        // IMUPLUS yaw is RELATIVE (drifts slowly) — fine for docking heading-hold + diff-drive
+        // nav (absolute heading comes from the map/scan, not the IMU). Also ends the power-on
+        // magnetometer calibration dance entirely (no mag = no figure-8).
+        bno.setMode(OPERATION_MODE_IMUPLUS);
         delay(50);
-        
+
         display_oled_alert("RESTORE:\nSUCCESS");
         delay(2000);
-    } 
+    }
     else {
+        // No stored offsets — still force IMUPLUS (magnetometer-free, motor-immune heading).
+        bno.setMode(OPERATION_MODE_CONFIG);
+        delay(50);
+        bno.setMode(OPERATION_MODE_IMUPLUS);
+        delay(50);
         display_oled_alert("RESTORE:\nNO DATA");
         delay(2000);
     }
@@ -74,7 +85,9 @@ void perform_imu_save() {
     uint8_t system, gyro, accel, mag;
     bno.getCalibration(&system, &gyro, &accel, &mag);
 
-    if (gyro != 3 || accel != 3 || mag != 3) {
+    // IMUPLUS uses gyro+accel only — do NOT wait on the magnetometer (it never calibrates
+    // when unused, which would block the save forever). Gyro+accel auto-calibrate on stillness.
+    if (gyro != 3 || accel != 3) {
         // Calibration not ready — keep flag set, retry next loop silently
         return;
     }

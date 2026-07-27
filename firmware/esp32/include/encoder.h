@@ -37,6 +37,7 @@ private:
     volatile long count_;  // Encoder count
     long last_count_;      // Last count for calculating RPM
     unsigned long last_time_;  // Last time in milliseconds
+    float last_rpm_ = 0.0f;    // Last computed RPM — HELD between 100ms updates (see getRPM)
 
     static Encoder* instances_[4];  // Array to store pointers to Encoder instances
 

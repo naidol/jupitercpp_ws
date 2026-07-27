@@ -99,10 +99,10 @@
 #define MOTOR_OPERATING_VOLTAGE 12          // motor's operating voltage (used to calculate max RPM)
 #define MOTOR_POWER_MAX_VOLTAGE 12          // max voltage of the motor's power source (used to calculate max RPM)
 #define MOTOR_POWER_MEASURED_VOLTAGE 12     // current voltage reading of the power connected to the motor (used for calibration)
-#define COUNTS_PER_REV1 1372                // wheel1 encoder's no of ticks per rev (calibrated for 65mm rubber wheels)
-#define COUNTS_PER_REV2 1372                // wheel2 encoder's no of ticks per rev
-#define COUNTS_PER_REV3 1372                // wheel3 encoder's no of ticks per rev
-#define COUNTS_PER_REV4 1372                // wheel4 encoder's no of ticks per rev
+#define COUNTS_PER_REV1 1290                // ticks per WHEEL rev — re-calibrated 2026-07-27 for the 100mm AGV wheels (was 1372, for old 65mm rubber). Tape-measured: 4267 counts / (1.05m / 0.3142m-circ) ~= 1290.
+#define COUNTS_PER_REV2 1290                // (odom was ~6% low with 1372; the big 2.6x error was the getRPM 0.0-return bug, fixed separately)
+#define COUNTS_PER_REV3 1290                // motors 3&4 unused (rear caster), kept consistent
+#define COUNTS_PER_REV4 1290
 #define WHEEL_DIAMETER 0.065                // wheel's diameter in meters (65mm rubber wheels)
 #define LR_WHEELS_DISTANCE 0.346            // distance between left and right wheels
 #define PWM_BITS 10                         // PWM Resolution of the microcontroller
