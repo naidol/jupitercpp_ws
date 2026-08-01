@@ -173,7 +173,7 @@ target_include_directories(jupiter_face_recognition PRIVATE
   ${OpenCV_INCLUDE_DIRS}
   ${cv_bridge_INCLUDE_DIRS}
   /usr/include/aarch64-linux-gnu                              # NvInfer.h, NvOnnxParser.h
-  /usr/local/cuda-13.0/targets/sbsa-linux/include            # cuda_runtime_api.h
+  /usr/local/cuda/targets/sbsa-linux/include            # cuda_runtime_api.h
 )
 
 target_link_libraries(jupiter_face_recognition
@@ -181,7 +181,7 @@ target_link_libraries(jupiter_face_recognition
   nlohmann_json::nlohmann_json
   nvinfer
   nvonnxparser
-  /usr/local/cuda-13.0/targets/sbsa-linux/lib/libcudart.so
+  /usr/local/cuda/targets/sbsa-linux/lib/libcudart.so
 )
 
 install(TARGETS

@@ -65,7 +65,9 @@ public:
     state_topic_     = declare_parameter<std::string>("state_topic",     "/dock/aligner_state");
 
     control_hz_       = declare_parameter("control_hz",        20.0);
-    v_reverse_        = declare_parameter("v_reverse",         0.05);   // m/s
+    v_reverse_        = declare_parameter("v_reverse",         0.05);   // m/s gentle APPROACH speed (heading stays stable)
+    v_push_           = declare_parameter("v_push",            0.14);   // m/s firmer TERMINAL push inside the throat (a gentle creep can't overcome steel-on-PLA rail friction; a hand-push at this force slides+squares it home)
+    throat_zone_      = declare_parameter("throat_zone",       0.28);   // m — at/below this reflector range: steering OFF + firm push, let the guide rails slide+square the robot (don't fight them)
     max_angular_      = declare_parameter("max_angular",       0.25);   // rad/s cap
 
     // Heading (dock-face squareness) control from the reflector, used in SQUARE and in the
@@ -73,9 +75,14 @@ public:
     // square_only:=true if unsure): az = clamp(heading_sign * kp_heading * nyaw).
     kp_heading_       = declare_parameter("kp_heading",        1.2);
     heading_sign_     = declare_parameter("heading_sign",      1.0);
-    square_tol_       = declare_parameter("square_tol_deg",    2.0) * M_PI / 180.0;
-    square_settle_s_  = declare_parameter("square_settle_s",   0.5);
-    square_timeout_s_ = declare_parameter("square_timeout_s",  20.0);
+    square_tol_       = declare_parameter("square_tol_deg",    1.0) * M_PI / 180.0;   // ±1deg = ~1.75cm drift over 1m creep, inside a ±3-5cm funnel
+    square_settle_s_  = declare_parameter("square_settle_s",   0.3);                  // hold in-band this long before locking heading (chassis settle)
+    square_timeout_s_ = declare_parameter("square_timeout_s",  25.0);
+    // In-place square uses a MIN rotational speed to reliably break floor scrub (a pure
+    // proportional cmd stalls below scrub then overshoots — hunting). Proportional above the
+    // floor for a gentle approach, hard-stop inside the deadband. (Gemini-recipe, 2026-07-27)
+    square_omega_min_ = declare_parameter("square_omega_min",  0.15);   // rad/s floor to overcome scrub
+    square_omega_max_ = declare_parameter("square_omega_max",  0.30);   // rad/s cap far from target
     square_only_      = declare_parameter("square_only",       false); // SQUARE then stop (sign check)
 
     // Below this range the reflector angle is unreliable -> hold IMU yaw instead.
@@ -84,7 +91,8 @@ public:
 
     // Optional lateral centring trim (default OFF; sign unverified).
     lateral_gain_     = declare_parameter("lateral_gain",      0.0);
-    max_lateral_corr_ = declare_parameter("max_lateral_corr",  0.05);
+    lat_sign_         = declare_parameter("lat_sign",          1.0);    // steer-direction for cross-track; flip if lat diverges
+    max_lateral_corr_ = declare_parameter("max_lateral_corr",  0.05);   // rad/s clamp on the cross-track contribution
 
     seat_contact_mask_= declare_parameter("seat_contact_mask", 3);      // both prox
     seat_zone_        = declare_parameter("seat_zone",         0.30);   // m — only seat-terminate this close
@@ -92,6 +100,15 @@ public:
     stuck_abort_s_    = declare_parameter("stuck_abort_s",     4.0);    // s of no-progress + NO contact near seat -> abort (jammed skewed)
     stall_eps_        = declare_parameter("stall_eps",         0.008);  // m — progress smaller than this = stalled
     seat_range_floor_ = declare_parameter("seat_range_floor",  0.15);   // m — hard stop even with no contact
+
+    // FINAL PUSH: one prox latched but the other won't seat (robot arrived a touch skewed) -> pivot
+    // the un-seated rear corner IN by rotating about the seated one, until BOTH latch. Sign is
+    // DERIVED, not guessed: contact=1 (left seated, right open) -> CW (az<0) swings the right-rear
+    // toward the dock; contact=2 (right seated) -> CCW (az>0). Firmware zeros angular the instant
+    // both prox confirm (dock_seated), so this is self-terminating and can't over-rotate.
+    push_omega_       = declare_parameter("push_omega",        0.22);   // rad/s pivot rate for the seat nudge
+    push_v_           = declare_parameter("push_v",            0.03);   // m/s gentle reverse kept during the nudge (firmware may gate it)
+    push_timeout_s_   = declare_parameter("push_timeout_s",    4.0);    // s — give up nudging -> accept partial seat
 
     invalid_abort_s_  = declare_parameter("invalid_abort_s",   1.0);
     acquire_stable_s_ = declare_parameter("acquire_stable_s",  0.5);
@@ -126,10 +143,11 @@ public:
   }
 
 private:
-  enum State { IDLE, ACQUIRE, SQUARE, REVERSE_IN, SEATED, ABORT };
+  enum State { IDLE, ACQUIRE, SQUARE, REVERSE_IN, PUSH, SEATED, ABORT };
   const char* state_name(State s) const {
     switch (s) { case IDLE: return "IDLE"; case ACQUIRE: return "ACQUIRE"; case SQUARE: return "SQUARE";
-                 case REVERSE_IN: return "REVERSE_IN"; case SEATED: return "SEATED"; default: return "ABORT"; }
+                 case REVERSE_IN: return "REVERSE_IN"; case PUSH: return "PUSH";
+                 case SEATED: return "SEATED"; default: return "ABORT"; }
   }
   void set_state(State s) {
     state_ = s;
@@ -164,6 +182,7 @@ private:
     if (!have_imu_) { res->success = false; res->message = "no IMU yet — micro-ROS agent up?"; return; }
     acquire_start_ = now();
     valid_since_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    in_throat_ = false;
     set_state(ACQUIRE);
     res->success = true; res->message = "acquiring dock lock...";
   }
@@ -213,14 +232,21 @@ private:
         }
         // Rotate in place to null the dock-face heading error. No linear motion = full runway,
         // no collision risk (this is also what square_only tests for sign).
+        const bool squared = std::fabs(refl_nyaw_) <= square_tol_;
         geometry_msgs::msg::Twist cmd;
         cmd.linear.x = 0.0;
-        cmd.angular.z = heading_cmd();
+        if (squared) {
+          cmd.angular.z = 0.0;   // hard-stop inside the ±square_tol deadband -> let the chassis settle
+          if (square_ok_since_.nanoseconds() == 0) square_ok_since_ = t;   // start settle timer
+        } else {
+          // Proportional above the scrub floor, capped; the MIN speed guarantees it actually
+          // rotates instead of stalling below breakaway then overshooting (the old hunting).
+          const double mag = clampd(kp_heading_ * std::fabs(refl_nyaw_),
+                                    square_omega_min_, square_omega_max_);
+          cmd.angular.z = heading_sign_ * std::copysign(mag, refl_nyaw_);
+          square_ok_since_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());   // reset settle timer
+        }
         cmd_pub_->publish(cmd);
-
-        const bool squared = std::fabs(refl_nyaw_) <= square_tol_;
-        if (!squared) square_ok_since_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-        else if (square_ok_since_.nanoseconds() == 0) square_ok_since_ = t;
 
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
           "SQUARE: nyaw %+.1f deg | az %+.2f | range %.3f%s",
@@ -252,10 +278,10 @@ private:
         if (refl_range_ < best_range_ - stall_eps_) { best_range_ = refl_range_; best_range_time_ = t; }
         if (refl_range_ < seat_zone_ && (contact_mask_ & 0x03) != 0 &&
             (t - best_range_time_).seconds() > seat_settle_s_) {
-          RCLCPP_WARN(get_logger(), "seated but not squared: contact=%u, no progress %.1fs at range %.3f "
-                      "(left=%d right=%d). Stopping.", contact_mask_, seat_settle_s_, refl_range_,
-                      (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0);
-          set_state(SEATED); publish_stop(); return;
+          RCLCPP_WARN(get_logger(), "one prox latched (contact=%u, left=%d right=%d), no progress %.1fs "
+                      "at range %.3f — final PUSH to seat the other.", contact_mask_,
+                      (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0, seat_settle_s_, refl_range_);
+          push_start_ = t; set_state(PUSH); return;
         }
         // Jammed near the seat but NO prox engaged (arrived too skewed) — don't grind; abort.
         if (refl_range_ < seat_zone_ && (contact_mask_ & 0x03) == 0 &&
@@ -272,6 +298,23 @@ private:
           abort_reason_ = "overall reverse timeout"; set_state(ABORT); publish_stop(); return;
         }
 
+        // --- TERMINAL THROAT PUSH ---
+        // Once the rear is in the funnel throat, STOP steering (angular=0) and push firmly straight.
+        // The mechanical guide rails do the squaring; a gentle creep can't beat steel-on-PLA friction
+        // (a hand-push at this force slid it home). Steering here would only FIGHT the rails. Latched,
+        // so a reflector dropout at close range can't kick us back to steering mid-throat.
+        if (refl_valid_ && refl_range_ > 0.0 && refl_range_ < throat_zone_) in_throat_ = true;
+        if (in_throat_) {
+          geometry_msgs::msg::Twist cmd;
+          cmd.linear.x  = -v_push_;
+          cmd.angular.z = 0.0;
+          cmd_pub_->publish(cmd);
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 400,
+            "THROAT PUSH: range %.3f | v %.2f | steering OFF (rails square) | contact %u",
+            refl_range_, v_push_, contact_mask_);
+          return;
+        }
+
         // --- heading law: reflector nyaw with runway (far), IMU-hold for the close-in ---
         double angular;
         if (refl_valid_ && refl_range_ > reflector_trust_range_) {
@@ -281,9 +324,13 @@ private:
           if (!imu_hold_active_) { imu_hold_yaw_ = yaw_; imu_hold_active_ = true; } // capture at boundary
           angular = clampd(kp_yaw_ * wrap_pi(imu_hold_yaw_ - yaw_), -max_angular_, max_angular_);
         }
-        // optional lateral trim (default off)
+        // CROSS-TRACK correction (far band only): steer the rear onto the dock's normal axis so
+        // a lateral staging offset gets pulled in instead of missing the funnel. lat_sign sets the
+        // steer direction (verify empirically — wrong sign makes lat diverge). Clamped so it can't
+        // overpower the heading term.
         if (lateral_gain_ > 0.0 && refl_valid_ && refl_range_ > reflector_trust_range_) {
-          angular = clampd(angular + clampd(lateral_gain_ * refl_lateral_, -max_lateral_corr_, max_lateral_corr_),
+          angular = clampd(angular + clampd(lat_sign_ * lateral_gain_ * refl_lateral_,
+                                            -max_lateral_corr_, max_lateral_corr_),
                            -max_angular_, max_angular_);
         }
 
@@ -298,26 +345,59 @@ private:
           imu_hold_active_ ? "IMU-hold" : "refl-square", contact_mask_);
         return;
       }
+
+      case PUSH: {
+        // Both prox confirmed -> full seat (firmware also zeros angular the moment dock_seated).
+        if ((contact_mask_ & 0x03) == seat_contact_mask_) {
+          RCLCPP_INFO(get_logger(), "PUSH: both prox seated (contact=%u).", contact_mask_);
+          set_state(SEATED); publish_stop(); return;
+        }
+        // Bounced off entirely -> accept and stop (don't chase a lost contact).
+        if ((contact_mask_ & 0x03) == 0) {
+          RCLCPP_WARN(get_logger(), "PUSH: lost prox contact — stopping.");
+          set_state(SEATED); publish_stop(); return;
+        }
+        // Give up nudging after the timeout -> accept the partial seat honestly.
+        if ((t - push_start_).seconds() > push_timeout_s_) {
+          RCLCPP_WARN(get_logger(), "PUSH: timeout %.1fs — accepting partial seat (contact=%u, left=%d right=%d).",
+                      push_timeout_s_, contact_mask_, (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0);
+          set_state(SEATED); publish_stop(); return;
+        }
+        // Pivot the un-seated rear corner toward the dock. Derived sign: left-only latched -> CW
+        // (az<0) drives the right-rear in; right-only -> CCW (az>0). Gentle reverse keeps pressure.
+        const bool left_only = (contact_mask_ & 0x03) == 1;
+        geometry_msgs::msg::Twist cmd;
+        cmd.linear.x  = -push_v_;
+        cmd.angular.z = left_only ? -push_omega_ : push_omega_;
+        cmd_pub_->publish(cmd);
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 400,
+          "PUSH: contact %u (left=%d right=%d) | az %+.2f | range %.3f | %.1fs",
+          contact_mask_, (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0,
+          cmd.angular.z, refl_range_, (t - push_start_).seconds());
+        return;
+      }
     }
   }
 
   // params
   std::string reflector_topic_, imu_topic_, contact_topic_, cmd_vel_topic_, state_topic_;
-  double control_hz_, v_reverse_, max_angular_, kp_heading_, heading_sign_, square_tol_,
-         square_settle_s_, square_timeout_s_, reflector_trust_range_, kp_yaw_, lateral_gain_,
+  double control_hz_, v_reverse_, v_push_, throat_zone_, max_angular_, kp_heading_, heading_sign_, square_tol_,
+         square_settle_s_, square_timeout_s_, square_omega_min_, square_omega_max_,
+         reflector_trust_range_, kp_yaw_, lateral_gain_, lat_sign_,
          max_lateral_corr_, seat_zone_, seat_settle_s_, stuck_abort_s_, stall_eps_, seat_range_floor_,
+         push_omega_, push_v_, push_timeout_s_,
          invalid_abort_s_, acquire_stable_s_, acquire_timeout_s_, overall_timeout_s_;
   bool square_only_;
   int seat_contact_mask_;
 
   // live inputs / state
-  bool   refl_valid_{false}, have_imu_{false}, imu_hold_active_{false};
+  bool   refl_valid_{false}, have_imu_{false}, imu_hold_active_{false}, in_throat_{false};
   double refl_lateral_{0}, refl_range_{0}, refl_nyaw_{0}, yaw_{0}, imu_hold_yaw_{0}, best_range_{1e9};
   uint8_t contact_mask_{0};
   rclcpp::Time last_refl_time_{0,0,RCL_ROS_TIME}, last_valid_refl_time_{0,0,RCL_ROS_TIME};
   rclcpp::Time acquire_start_{0,0,RCL_ROS_TIME}, valid_since_{0,0,RCL_ROS_TIME},
                square_ok_since_{0,0,RCL_ROS_TIME}, motion_start_{0,0,RCL_ROS_TIME},
-               best_range_time_{0,0,RCL_ROS_TIME};
+               best_range_time_{0,0,RCL_ROS_TIME}, push_start_{0,0,RCL_ROS_TIME};
   State state_{IDLE};
   std::string abort_reason_;
 

@@ -41,6 +41,14 @@ def generate_launch_description():
             description='Set false to skip micro-ROS agent (ESP32 not connected).',
         ),
 
+        DeclareLaunchArgument(
+            'enable_nav',
+            default_value='false',
+            description='Start the navigation stack. OFF by default: navigation.launch.py '
+                        'is the old LD20+cuVSLAM stack (both dropped in the lean rebuild). '
+                        'Rework to S2E before enabling.',
+        ),
+
         # ── Camera ────────────────────────────────────────────────────────────
         # Started first and never killed — keeps Orbbec firmware warm.
         # All streams: color (face recog) + IR stereo (cuVSLAM) + IMU (EKF).
@@ -56,7 +64,7 @@ def generate_launch_description():
         TimerAction(period=0.0, actions=[
             ExecuteProcess(
                 cmd=['bash', '-c',
-                     'DISPLAY=:0 XAUTHORITY=/run/user/2002/gdm/Xauthority '
+                     'DISPLAY=:0 XAUTHORITY=/run/user/2001/gdm/Xauthority '
                      'xset s off s noblank dpms 0 0 0'],
                 output='screen',
                 name='disable_screensaver',
@@ -69,7 +77,7 @@ def generate_launch_description():
                 executable='jupiter_display',
                 name='jupiter_display',
                 output='screen',
-                additional_env={'DISPLAY': ':0', 'XAUTHORITY': '/run/user/2002/gdm/Xauthority'},
+                additional_env={'DISPLAY': ':0', 'XAUTHORITY': '/run/user/2001/gdm/Xauthority'},
             ),
         ]),
 
@@ -77,8 +85,12 @@ def generate_launch_description():
         # Bus 001 (ESP32) — independent of camera Bus 002.
         TimerAction(period=0.0, actions=[
             ExecuteProcess(
-                cmd=['ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
-                     'serial', '--dev', '/dev/jupiter_esp32', '-b', '460800'],
+                # micro_ros_agent lives in ~/microros_ws (separate overlay) — must be
+                # sourced or "Package 'micro_ros_agent' not found". ttyUSB0 = /dev/jupiter_esp32.
+                cmd=['bash', '-c',
+                     'source "$HOME/microros_ws/install/local_setup.bash" && '
+                     'exec ros2 run micro_ros_agent micro_ros_agent '
+                     'serial --dev /dev/jupiter_esp32 -b 460800'],
                 output='screen',
                 name='micro_ros_agent',
                 condition=IfCondition(enable_microros),
@@ -94,6 +106,7 @@ def generate_launch_description():
                 PythonLaunchDescriptionSource(
                     os.path.join(bringup_dir, 'launch', 'navigation.launch.py')
                 ),
+                condition=IfCondition(LaunchConfiguration('enable_nav')),
             ),
         ]),
 
@@ -105,10 +118,13 @@ def generate_launch_description():
                 executable='jupiter_voice',
                 name='jupiter_voice',
                 output='screen',
+                additional_env={'XDG_RUNTIME_DIR': '/run/user/2001'},  # pw-cat -> PipeWire for TTS
                 parameters=[{
                     'energy_threshold': 300.0,
                     'record_seconds':   4,
                     'vad_snr_ratio':    1.7,
+                    # HDMI display-speaker sink on JetPack 7.2 (profile changed from hdmi-stereo)
+                    'tts_sink':         'alsa_output.platform-88090b0000.hda.HiFi__hw_HDA_3__sink',
                 }],
             ),
         ]),

@@ -48,7 +48,7 @@ def generate_launch_description():
         # optical frame = yaw pi (face rear) then optical convention (roll -pi/2, extra yaw -pi/2).
         Node(package='tf2_ros', executable='static_transform_publisher', name='base_to_webcam_optical',
              arguments=['--x', '-0.160', '--y', '0', '--z', '0.4375',
-                        '--roll', '-1.5708', '--pitch', '0', '--yaw', '-1.5708',
+                        '--roll', '-1.5708', '--pitch', '0', '--yaw', '1.5708',
                         '--frame-id', 'base_footprint', '--child-frame-id', 'webcam_optical_frame']),
 
         # Rear webcam -> /webcam/image_raw
@@ -61,8 +61,9 @@ def generate_launch_description():
              output='screen',
              parameters=[{
                  'camera_topic': '/webcam/image_raw',
+                 'marker_frame_id': 'webcam_optical_frame',   # default is the Orbbec frame — no TF!
                  'image_width': 1280, 'image_height': 720,
-                 'marker_size_m': 0.080,
+                 'marker_size_m': 0.100,   # 100mm tag on the dock stand (2026-07-12); verify black-square vs tape+z ratio
                  'cam_fx': 868.0, 'cam_fy': 868.0, 'cam_cx': 640.0, 'cam_cy': 360.0,
              }]),
 

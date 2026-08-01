@@ -22,7 +22,7 @@ docking_server:
     dock_approach_timeout: 60.0         # slow ice-skate approach needs time
     undock_linear_tolerance: 0.05
     undock_angular_tolerance: 0.1
-    max_retries: 3
+    max_retries: 0                      # ZERO — a retry drove the spin-and-attack-doorway chaos; fail = STOP+report, never adventure
     base_frame: "base_footprint"
     fixed_frame: "odom"
     dock_backwards: true                # caster-first into the rails; rear webcam faces the dock
@@ -33,14 +33,14 @@ docking_server:
       plugin: "opennav_docking::SimpleChargingDock"
       # --- detection ---
       use_external_detection_pose: true       # subscribe detected_dock_pose (remap from vision)
-      external_detection_timeout: 1.0         # tag drops brief (motion blur) — ride through
-      filter_coef: 0.1                        # pose low-pass
+      external_detection_timeout: 3.0         # tag drops 0.5-1.5s under motion blur — proven; 1.0 aborted mid-approach
+      filter_coef: 0.3                        # pose low-pass; 0.1 was so slow the (formerly wrong-yaw) seed corrupted the early corridor for ~10s
       # Tag optical frame -> dock frame: optical z(out of camera toward tag) becomes dock x
       # (approach axis). Standard optical->ROS rotation; trim after first bench reads.
-      external_detection_translation_x: 0.0
+      external_detection_translation_x: -0.28   # tag plane -> SEAT point (base origin when docked; LiDAR seat calib 0.242+0.035). Without this the controller drives THROUGH the seat into the dock
       external_detection_translation_y: 0.0
       external_detection_rotation_roll: -1.5708
-      external_detection_rotation_pitch: 1.5708
+      external_detection_rotation_pitch: -1.5708  # +1.5708 flipped the dock axis 180deg -> robot tried to turn around and nose-in (user-observed CCW spin)
       external_detection_rotation_yaw: 0.0
       # --- docked / charging ---
       docking_threshold: 0.04                 # m pose-distance = docked (prox sensors will replace)
@@ -56,9 +56,9 @@ docking_server:
       k_delta: 1.0
       beta: 0.4
       lambda: 2.0
-      v_linear_min: 0.06        # deadband floor: commands below this stall the base
-      v_linear_max: 0.08        # user: slow — the rails need time to thread the caster
-      v_angular_max: 0.4
+      v_linear_min: 0.05        # deadband floor: commands below this stall the base
+      v_linear_max: 0.06        # SLOWER than the "too fast" 0.08, but >0.05 so reverse (weak/fast-decay dir) still breaks stiction
+      v_angular_max: 0.12       # SLOW turn (user: "angular far too high" @0.25)
       slowdown_radius: 0.25
       use_collision_detection: false   # no costmap in the bench bringup; enable under full Nav2
 

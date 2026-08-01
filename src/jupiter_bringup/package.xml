@@ -10,7 +10,8 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>robot_localization</exec_depend>
-  <exec_depend>ldlidar_stl_ros2</exec_depend>
+  <!-- ldlidar_stl_ros2 dropped 2026-07-30: LD20 removed in lean rebuild; nav/dock use RPLIDAR S2E (sllidar_ros2) -->
+
 
   <export>
     <build_type>ament_cmake</build_type>
