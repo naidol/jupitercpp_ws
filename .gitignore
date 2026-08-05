@@ -35,3 +35,4 @@ maps/bags/
 
 # PlatformIO build dirs for in-repo firmware (dock_beacon, esp32)
 firmware/**/.pio/
+.aider*
