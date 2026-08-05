@@ -117,6 +117,18 @@ Interface (unchanged from the old detector, so controllers are drop-in):
 **`src/jupiter_nodes/src/dock_aligner.cpp`** — "stop-and-re-aim" controller. **Compiles clean and is
 deployed on Thor. It has never been run.** Treat its behaviour as unknown.
 
+> ⚠️ **It is NOT on `main`.** Because it is untested, it lives only on the branch
+> **`transition/claude-to-copilot`** (commit `7f08dd3`). `main` still carries the *previous*
+> SQUARE-then-REVERSE aligner — the known-failing Gen-4 version described in §3. To work on the new
+> one: `git checkout transition/claude-to-copilot`. Merge it to `main` only once a live run proves it.
+>
+> ⚠️ **Thor's working copy is ahead of `main`.** The robot already has the stop-and-re-aim source
+> deployed and built. So `ros2 run jupiter_nodes dock_aligner` on the robot **right now runs the new
+> untested controller**, regardless of which branch is checked out on the hub. Before any test,
+> confirm which version is actually deployed:
+> `ssh jupiter@192.168.0.8 'grep -c STOP-AND-RE-AIM ~/jupitercpp_ws/src/jupiter_nodes/src/dock_aligner.cpp'`
+> (`3` = new controller, `0` = old). Rebuild after any rsync — see §5 "How to run it".
+
 Design — uses *only* the two proven primitives from §1, like a driver backing a trailer:
 
 ```
