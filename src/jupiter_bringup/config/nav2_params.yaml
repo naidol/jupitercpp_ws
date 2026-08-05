@@ -49,7 +49,7 @@ controller_server:
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 3.14
+      yaw_goal_tolerance: 0.10           # 2026-08-03: 3.14 (disabled, ~180deg) -> 0.10 so RPP does its final rotate-to-heading
       stateful: true
 
     FollowPath:

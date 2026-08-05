@@ -60,8 +60,11 @@ def generate_launch_description():
         # ── Sensors / odometry ────────────────────────────────────────────────
         # micro-ROS agent — ESP32: /odom/unfiltered + receives /cmd_vel for the motors
         ExecuteProcess(
-            cmd=['ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
-                 'serial', '--dev', '/dev/jupiter_esp32', '-b', '460800'],
+            # micro_ros_agent lives in ~/microros_ws (separate overlay) — must be sourced.
+            cmd=['bash', '-c',
+                 'source "$HOME/microros_ws/install/local_setup.bash" && '
+                 'exec ros2 run micro_ros_agent micro_ros_agent '
+                 'serial --dev /dev/jupiter_esp32 -b 460800'],
             output='screen', name='micro_ros_agent',
         ),
 
@@ -83,23 +86,12 @@ def generate_launch_description():
             arguments=['0.035', '0.0', '0.518', '3.14159265', '0', '0', 'base_footprint', 'base_laser'],  # z tape-measured floor->S2E scan plane 2026-07-24 (was 0.5325 guess)
         ),
 
-        # LD20 LOW lidar (LD19 profile) — /scan_low in frame ld20_laser, ~0.13 m above ground.
-        # Second obstacle source for the costmap: catches LOW furniture (chair legs, feet) under the
-        # S2E's 0.515 m plane. Orientation verified in RViz (yaw 0). The costmap masks its own near
-        # structure via 0.30 m min ranges, so no angular crop is needed here. Replaces nvblox.
-        Node(
-            package='ldlidar_stl_ros2', executable='ldlidar_stl_ros2_node', name='LD19_low',
-            output='screen',
-            parameters=[
-                {'product_name':           'LDLiDAR_LD19'},
-                {'topic_name':             'scan_low'},
-                {'frame_id':               'ld20_laser'},
-                {'port_name':              '/dev/jupiter_lidar'},
-                {'port_baudrate':          230400},
-                {'laser_scan_dir':         True},
-                {'enable_angle_crop_func': False},
-            ],
-        ),
+        # LD20 LOW lidar — REMOVED 2026-08-03: LD20 physically gone. Its /scan_low fed the costmap's
+        # LOW obstacle layer (chair legs, feet under the S2E's 0.518 m plane); that layer is now BLIND
+        # until the VL53L0X ToF ring replaces it (see PARKING_LOT nav plan). Node deleted so it can't
+        # fail on the missing /dev/jupiter_lidar. The costmap 'scan_low' observation_source is harmlessly
+        # absent (obstacle layer runs on S2E /scan only). ⚠️ DO NOT run autonomous nav until the low
+        # layer is back — teleop / localization-only is safe.
         # Static TF base_footprint -> ld20_laser: 6 cm forward, centred, 13 cm up, yaw 0.
         Node(
             package='tf2_ros', executable='static_transform_publisher',
