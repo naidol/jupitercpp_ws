@@ -102,6 +102,42 @@ default.
 - Any `cmd_vel` message with non-zero velocity **cancels** an in-flight move and returns to velocity
   mode — so teleop always wins as an e-stop.
 
+### 4.1a ⚠️ Command arbitration — the `cmd_vel` watchdog WILL break this if not handled
+
+`/cmd_vel` is currently the **only** channel from Thor to the motors; Nav2 and `dock_aligner`
+share it (never simultaneously). `/wheel_move` makes that **two** channels into the same motors,
+so `moveBase()` must arbitrate explicitly rather than have the two paths race.
+
+**The trap:** `moveBase()` opens with a watchdog —
+```cpp
+if (millis() - last_cmd_vel_ms > CMD_VEL_TIMEOUT_MS)   // 400 ms
+    target_linear_velocity = target_linear_y_velocity = target_angular_velocity = 0;
+```
+— and all-zero velocities then take the branch that writes `setSpeed(0)` = **BRAKE**. During a
+position move nothing publishes `cmd_vel`, so **the watchdog would brake the wheels 400 ms into
+every segment.** Position mode must therefore be a genuine mode, not an addition:
+
+```
+if (move_active):
+      # POSITION MODE — cmd_vel watchdog does NOT apply (no cmd_vel is expected)
+      # its own stall + timeout guards provide the equivalent protection
+      rpm_cmd from position error (§4.2)
+else:
+      # VELOCITY MODE — exactly today's behaviour, watchdog included. UNCHANGED.
+```
+
+**Mode entry/exit:**
+- `/wheel_move` received → enter position mode
+- move completes, stalls, times out, or a **non-zero `cmd_vel`** arrives → exit to velocity mode
+- on exit, reset `last_cmd_vel_ms` so the velocity watchdog does not instantly fire a stale timeout
+
+**Safety equivalence:** position mode gives up the `cmd_vel` watchdog, so its stall and timeout
+guards (§4.3) are not optional — they are the replacement for it. A position loop with neither
+would push against a blocked wheel indefinitely.
+
+**Nav2 impact: none.** It never publishes `/wheel_move`, so it never enters position mode, and the
+velocity path it uses is byte-for-byte unchanged.
+
 ### 4.2 Control law per wheel
 
 ```
@@ -126,7 +162,7 @@ the current velocity loop — no rewrite of what already works.
 | **Timeout** | segment exceeds `expected_time × 3` → ABORT_TIMEOUT |
 | **Segment cap** | reject any move > `MAX_SEGMENT_COUNTS` (≈ 1.5 m) — guards against a bad computation driving the robot across the room |
 | **cmd_vel override** | any non-zero `cmd_vel` cancels the move (teleop e-stop) |
-| **Existing reflexes** | prox seat-reflex and the `cmd_vel` watchdog remain in force |
+| **Existing reflexes** | prox seat-reflex remains in force, unchanged |
 | **Deadband stall near target** | the last few counts are hardest; allow `DONE_TOLERANCE_COUNTS` rather than chasing zero, and let the outer loop correct the residual |
 
 ---
