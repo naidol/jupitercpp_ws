@@ -68,7 +68,15 @@
 
 
 // FOR PID
-#define K_P 5.0                            // P constant — raised from 2.0: larger wheels give lower req_rpm so startup PWM was too low to overcome stiction
+// ⚠️ KNOWN ISSUE, DELIBERATELY NOT FIXED HERE (2026-08-08) — K_P IS MIS-SCALED FOR LOW SPEED.
+// Measured (docs/bench_wheel_tracking_long.csv): the loop takes 4-9 s to reach a commanded wheel
+// speed. K_P=5 is scaled for the FULL 0-214 RPM range (PWM_MAX=1023), so at docking speeds a
+// ~5 RPM error asks for only ~25 counts (~2.4 % duty) against a wheel needing ~15-20 % to break
+// friction — leaving the slow integral to do all the work. A raise to ~15 was drafted and
+// REVERTED: this loop is shared with Nav2, and docking has moved to POSITION control
+// (docs/DOCK_POSITION_CONTROL_SPEC.md) which takes the velocity lag off docking's critical path.
+// Fix this when navigation performance is the subject, not as a side effect of docking work.
+#define K_P 5.0                            // P constant — see mis-scaling note above
 #define K_I 5.0                            // I constant
 #define K_D 0.0                            // D constant
 
@@ -83,8 +91,28 @@
 // (|rpm| < RELEASE) AND actually commanded to move meaningfully (|req_rpm| > CMD_MIN).
 // Once the wheel is rolling, FF drops out so the PID has clean fine control (a continuous
 // FF slams tiny heading corrections and made the reverse over-rotate & miss the dock).
+//
+// ⚠️ KNOWN ISSUE (2026-08-08) — THIS GATE CAUSES UNCOMMANDED YAW AT CRAWL SPEED.
+// The hard on/off step sits at 4 RPM, right inside the old docking band. At v=0.04 m/s the
+// wheels ran 3.4-7.1 RPM and crossed it repeatedly: FF on -> wheel accelerates -> FF drops
+// 200 counts -> wheel decelerates -> FF on. Both wheels chatter INDEPENDENTLY across that step,
+// and a difference between wheels IS a turn — measured 133 % L/R asymmetry at 0.04 m/s vs 3 %
+// at 0.12 m/s. This is very likely what was long blamed on "leading caster drift".
+// A tapered continuous FF (STATIC at rest -> ~140 rolling) was drafted as the fix and REVERTED
+// for the same reason as K_P above: shared with Nav2, and position-control docking sidesteps it.
+// INTERIM MITIGATION: do not operate below ~0.10 m/s — asymmetry collapses to ~3 % there.
 #define MOTOR_FF_RELEASE_RPM 4.0f    // above this the wheel is "rolling" -> no FF
 #define MOTOR_FF_CMD_MIN     3.0f    // don't kick a wheel commanded to ~zero (e.g. pivot-idle side)
+
+// BATTERY-VOLTAGE COMPENSATION (2026-08-08). Motor torque per PWM count scales with pack
+// voltage, so gains tuned at one state of charge run ~17 % hotter on a full pack. The robot
+// docks when it is LOW (that is the whole point of docking), so the tune is done there —
+// this normalises the duty to MOTOR_V_NOMINAL so the SAME tune behaves identically from
+// 16.8 V down to the docking range, and navigation at full charge does not get quietly
+// stronger. Guarded: an unread/implausible battery reading leaves the duty untouched.
+#define MOTOR_V_NOMINAL   14.4f      // reference pack voltage — the docking-condition tuning point
+#define MOTOR_V_COMP_MIN  0.80f      // clamp on the scale factor (16.8 V -> 0.857)
+#define MOTOR_V_COMP_MAX  1.25f      // clamp on the scale factor (12.0 V -> 1.200)
 
 // Per-motor trim to compensate physical motor mismatch.
 // Tune: if robot drifts right, reduce MOTOR1_TRIM. If drifts left, reduce MOTOR2_TRIM.
@@ -103,8 +131,11 @@
 #define COUNTS_PER_REV2 1290                // (odom was ~6% low with 1372; the big 2.6x error was the getRPM 0.0-return bug, fixed separately)
 #define COUNTS_PER_REV3 1290                // motors 3&4 unused (rear caster), kept consistent
 #define COUNTS_PER_REV4 1290
-#define WHEEL_DIAMETER 0.065                // wheel's diameter in meters (65mm rubber wheels)
-#define LR_WHEELS_DISTANCE 0.346            // distance between left and right wheels
+// REMOVED 2026-08-08: WHEEL_DIAMETER (0.065) and LR_WHEELS_DISTANCE (0.346) were stale values
+// from the old 65 mm rubber wheels / earlier chassis measurement. Both were referenced NOWHERE
+// in the firmware (verified), but sat next to the live values as a trap — anyone reaching for
+// "wheel diameter" would have got 65 mm instead of 100 mm, a 35 % error. The live geometry is
+// WHEEL_RADIUS and WHEEL_SEPARATION below; use only those.
 #define PWM_BITS 10                         // PWM Resolution of the microcontroller
 #define PWM_FREQUENCY 8000                  // PWM Frequency
 #define PWM_MAX pow(2, PWM_BITS) - 1        // e.g. for 8-bit PWM_MAX = 2^8 - 1 = 256 - 1 = 255

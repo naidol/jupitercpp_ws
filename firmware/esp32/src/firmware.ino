@@ -263,6 +263,18 @@ void publish_battery()
 
 // ---- Motion ----
 
+// Duty scale that holds torque constant as the pack discharges (see jupiter_config.h).
+// Returns exactly 1.0 if the battery reading is missing or implausible, so a bad ADC can
+// never scale the motors up.
+static inline float voltageScale()
+{
+    if (last_battery_v < BATTERY_V_MIN || last_battery_v > (BATTERY_V_MAX + 0.5f)) return 1.0f;
+    float scale = MOTOR_V_NOMINAL / last_battery_v;
+    if (scale < MOTOR_V_COMP_MIN) scale = MOTOR_V_COMP_MIN;
+    if (scale > MOTOR_V_COMP_MAX) scale = MOTOR_V_COMP_MAX;
+    return scale;
+}
+
 void moveBase(float dt)
 {
     float current_rpm1, current_rpm2, current_rpm3, current_rpm4;
@@ -323,6 +335,8 @@ void moveBase(float dt)
         // start together, no arc) then gets out of the way once rolling so the PID does clean
         // fine steering. A continuous kick slammed tiny reverse heading corrections and made
         // the robot over-rotate off the dock.
+        // ⚠️ The 4 RPM gate below causes uncommanded yaw at crawl speed — see the KNOWN ISSUE
+        // note in jupiter_config.h. Mitigation for now: do not operate below ~0.10 m/s.
         if (fabsf(req_rpm.motor1) > MOTOR_FF_CMD_MIN && fabsf(current_rpm1) < MOTOR_FF_RELEASE_RPM)
             target_rpm1 += copysignf(MOTOR_FF_STATIC, req_rpm.motor1);
         if (fabsf(req_rpm.motor2) > MOTOR_FF_CMD_MIN && fabsf(current_rpm2) < MOTOR_FF_RELEASE_RPM)
@@ -336,8 +350,13 @@ void moveBase(float dt)
         target_rpm4 = 0.0f;
     }
 
-    motor1.setSpeed(target_rpm1);
-    motor2.setSpeed(target_rpm2);
+    // Hold torque constant as the pack discharges: the tune is done at the docking-condition
+    // voltage (the robot docks BECAUSE it is low), and this keeps the same tune honest at full
+    // charge instead of ~17 % hotter. Applied to PID+FF together — both are duties, and the
+    // torque both produce scales with pack voltage. Zero stays zero (brake).
+    const float vscale = voltageScale();
+    motor1.setSpeed(target_rpm1 * vscale);
+    motor2.setSpeed(target_rpm2 * vscale);
     motor3.setSpeed(0);
     motor4.setSpeed(0);
 
