@@ -11,19 +11,49 @@
 
 ## 1. ⭐ The decisive measurement — read this first
 
-**This drivetrain has essentially no steering authority while reversing at crawl speed.**
+**The ESP32 velocity PID takes 4–9 seconds to reach a commanded wheel speed. A docking approach
+lasts ~7 seconds. Every steering correction was abandoned before the firmware could execute it.**
 
-Measured live, 2026-08-05: a **saturated** steering command (`angular.z = 0.20 rad/s`, the controller
-cap) held for **2+ seconds** at `linear.x = -0.14 m/s` produced **no observable rotation**, while the
-robot's lateral drift continued to grow.
+Measured 2026-08-08 (`bench_wheel_tracking_long.py`, straight reverse, 10 s dwell, data in
+[`bench_wheel_tracking_long.csv`](bench_wheel_tracking_long.csv)):
 
-**Why:** reversing turns the rear *trailing* casters into *leading* casters — classically unstable. The
-available wheel-speed differential (±~3 cm/s at docking speed) cannot overcome the side-force of the
-loaded casters. Drift direction is **random left or right**, depending on how the casters happen to be
-sitting when motion starts — which is why it is not a trim or calibration issue.
+| Speed | 2–3 s | 8–10 s |
+|---|---|---|
+| 0.04 m/s | 51 % | **88 %** |
+| 0.06 m/s | 44 % | **91 %** |
+| 0.08 m/s | 43 % | **108 %** |
+| 0.12 m/s | 66 % | **98 %** |
 
-**Consequence:** *every* control law that steers while moving is invalid here, regardless of gains.
-That covers everything in §3.
+The loop **does** converge — it is **under-gained in the low-RPM docking regime**, not broken.
+`K_P = 5` is scaled for the full 0–214 RPM range (`PWM_MAX = 1023`), so a 5 RPM error produces
+~2.4 % duty against a wheel needing ~15–20 % to break friction; the slow integral then does all the
+work. A steering correction *is* a change in commanded wheel speeds, so it inherits that 4–9 s lag.
+This is why saturated commands produced no rotation, why the measured dead time was 2–3 s, and why
+both wheels sat at the *mean* of their two commanded speeds — the differential never had time to
+develop.
+
+> **⚠️ CORRECTION — two earlier explanations here were wrong. Do not act on them.**
+>
+> 1. **"The drivetrain has no steering authority; leading casters overpower the differential"**
+>    (Claude, 2026-08-05). The *observation* was right — saturated command, no rotation — but the
+>    cause was not caster physics. It was the firmware still ramping. This wrongly framed the
+>    problem as a mechanical wall requiring a wider funnel or different casters.
+> 2. **"The PID is structurally broken / cannot deliver differential"** (Copilot,
+>    [`DOCKING_HANDOVER_2026-08-08.md`](DOCKING_HANDOVER_2026-08-08.md) §1, §4). Right layer,
+>    wrong verdict: that report measured t = 2–3 s of a 3 s step and read a transient as steady
+>    state. Its numbers reproduce exactly; only the interpretation was wrong. Its §5.2 option 2
+>    (coupled velocity + yaw-rate rewrite) is **not warranted**. Note also `PWM_MAX = 1023`, not
+>    255 — every duty figure in its §5 is 4× off.
+>
+> **The common failure:** three sessions diagnosed the symptom at the wrong layer — controller
+> gains, then caster mechanics, then firmware structure — before anyone held a test long enough to
+> watch the loop converge. When a plant "won't respond", measure how long it takes to respond
+> before concluding it can't.
+
+**Consequence:** the blocker is a **firmware gain fix** (§6), not a control-law redesign and not
+mechanical. The control laws in §3 failed because they were all issuing corrections shorter than
+the plant's response time — they are not invalidated on their own merits, but none should be
+re-tested until the firmware converges in ≲1.5 s.
 
 **What the robot DOES do reliably** (proven in every single run):
 1. **Rotate in place** to **±1°** — min-speed 0.15 rad/s + deadband + 0.3 s settle.
@@ -186,15 +216,27 @@ that removes the only `/cmd_vel` publisher and the firmware's 400 ms watchdog ha
 
 ## 6. Candidate paths — ranked by confidence
 
-1. **Widen the funnel mouth (mechanical).** ⭐ *Highest confidence.* Make the dock forgiving rather
-   than the robot precise — the vacuum-robot philosophy. A capture mouth that swallows ±5 cm / ±10°
-   sidesteps the §1 limitation entirely, and the robot can already arrive within that envelope. Print
-   in halves and join if the build plate is the constraint. **Note the current trend is the wrong way:**
-   the funnel was recently made *shorter*, which reduces correction runway.
-2. **Test the stop-and-re-aim controller** (§5). Free — it is already built and deployed.
-3. **Change the casters** — damped, or rigid/steerable — to remove the reverse instability at source.
-4. **Nose-first docking** — fixes the physics outright, but conflicts with the face-the-room doctrine.
-   Requires Logan's agreement, not an engineering decision alone.
+*(Re-ranked 2026-08-08 after the §1 correction. The mechanical options were ranked first when the
+problem was believed to be a caster/physics wall; it is a firmware gain problem, so they drop.)*
+
+1. **Fix the ESP32 velocity loop.** ⭐ *Now the only thing blocking progress.* Instrument
+   `moveBase()` (log `req_rpm, current_rpm, pid_out, integral, duty`), then apply **continuous
+   Coulomb friction feed-forward** — `MOTOR_FF_STATIC` already is this, but is gated to fire only
+   below `MOTOR_FF_RELEASE_RPM = 4`, so it assists breakaway then abandons the wheel — **plus a
+   higher `K_P`** for low-RPM authority. One change at a time; re-run
+   `bench_wheel_tracking_long.py` after each. Requires a firmware flash → Logan's explicit approval.
+   **Acceptance:** ≥ 90 % of commanded within **1.5 s**, and delivered wheel ratio ≥ 1.6 when 1.96
+   commanded (re-run Phase B of `bench_wheel_breakaway.py` at 3 s dwell).
+2. **Then re-test a controller.** Once the loop is fast, the §3 laws deserve a fresh look — they
+   failed against a plant that could not answer them, which is not the same as failing on merit.
+   The stop-and-re-aim controller (§5) is built, deployed and free to try; `dock_aligner_v2`'s
+   pursuit law is the more capable option if the plant can now steer.
+3. **Widen the funnel mouth (mechanical).** Still worthwhile as tolerance — making the dock forgiving
+   rather than the robot precise is sound regardless. But it is no longer the primary fix, and the
+   recent reprint went the *wrong* way (shorter funnel = less correction runway).
+4. **Caster / nose-first changes.** Deprioritised — the reverse instability they target is not the
+   root cause. Nose-first also conflicts with the face-the-room doctrine and is Logan's call, not an
+   engineering decision alone.
 
 ### Open safety item
 ⚠️ **SSR latch on undock-while-charging.** The directional IR still reaches the dock's TSOP at ≥1.1 m,
