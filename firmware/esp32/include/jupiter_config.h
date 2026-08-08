@@ -104,6 +104,34 @@
 #define MOTOR_FF_RELEASE_RPM 4.0f    // above this the wheel is "rolling" -> no FF
 #define MOTOR_FF_CMD_MIN     3.0f    // don't kick a wheel commanded to ~zero (e.g. pivot-idle side)
 
+// ===== POSITION-CONTROL (SEGMENT) MODE — /wheel_move =====================================
+// Docking commands DISTANCES (encoder counts), not speeds. Steering is a differential
+// distance: dS = theta * WHEEL_SEPARATION — pure geometry, independent of HOW FAST it
+// happens. So a slow/ugly velocity profile still lands the wheels on their target counts and
+// the turn comes out right. This takes the velocity loop's 4-9 s settling time (see K_P note
+// above) off docking's critical path instead of fighting it.
+// Full design + rationale: docs/DOCK_POSITION_CONTROL_SPEC.md
+//
+// ⚠️ Position mode SUSPENDS the cmd_vel watchdog (nothing publishes cmd_vel during a move, and
+// the watchdog would brake the wheels 400 ms in). The stall + timeout guards below are its
+// safety equivalent and are therefore NOT optional.
+#define MOVE_K_POS            0.060f   // RPM commanded per count of remaining error
+                                       // proportional band = MAX_RPM / K_POS ~= 420 counts (~10 cm) of deceleration
+#define MOVE_DEFAULT_MAX_RPM  25.0f    // segment speed cap when the command doesn't specify one
+#define MOVE_ACCEL_RPM_S      60.0f    // slew limit on the RPM command (trapezoidal profile, no jerk)
+#define MOVE_DONE_TOL_COUNTS  8        // |error| within this = arrived (8 counts ~= 2 mm)
+#define MOVE_DONE_HOLD_MS     100      // must stay in tolerance this long before DONE
+#define MOVE_STALL_MS         700      // no progress for this long -> ABORT_STALL
+#define MOVE_STALL_MIN_COUNTS 3        // progress smaller than this counts as "no progress"
+#define MOVE_MAX_SEGMENT_CNT  6200     // reject any segment longer than this (~1.5 m) — guards
+                                       // against a bad computation driving across the room
+#define MOVE_TIMEOUT_FACTOR   3.0f     // abort after expected_time * this (+1 s floor)
+#define MOVE_DIVERGE_COUNTS   150      // abort if remaining error GROWS this far beyond its start
+                                       // value (~3.6 cm). Catches an inverted encoder sign or a
+                                       // wheel driven the wrong way: without it the loop reads a
+                                       // growing error, holds full speed, and runs until timeout
+                                       // (~3.6 m on a long segment) instead of stopping at once.
+
 // BATTERY-VOLTAGE COMPENSATION (2026-08-08). Motor torque per PWM count scales with pack
 // voltage, so gains tuned at one state of charge run ~17 % hotter on a full pack. The robot
 // docks when it is LOW (that is the whole point of docking), so the tune is done there —

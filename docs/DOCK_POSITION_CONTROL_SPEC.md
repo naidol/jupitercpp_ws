@@ -1,6 +1,7 @@
 # Position-Control Docking — Design Spec (for review, nothing built)
 
-**Date:** 2026-08-08 · **Status:** 📋 **PROPOSAL — not implemented, not flashed**
+**Date:** 2026-08-08 · **Status:** 🔨 **ESP32 side IMPLEMENTED + COMPILES — NOT FLASHED, NEVER RUN**
+(aligner side §5 still unwritten; `W` calibration §3 still outstanding)
 **Origin:** Logan's proposal, after the velocity loop was measured at 4–9 s to reach a commanded
 wheel speed ([`DOCKING_HANDOVER_2026-08-08.md`](DOCKING_HANDOVER_2026-08-08.md) §8).
 
@@ -159,6 +160,8 @@ the current velocity loop — no rewrite of what already works.
 | Guard | Behaviour |
 |---|---|
 | **Stall** | no count progress on a commanded wheel for `STALL_MS` (≈ 700 ms) → stop, publish ABORT_STALL. **Critical:** a position loop pushes forever against a blocked wheel; without this it will cook a motor. |
+| **Divergence** ⭐ | remaining error GROWS more than `MOVE_DIVERGE_COUNTS` (150, ≈ 3.6 cm) past its start value → ABORT_DIVERGE. Catches an **inverted encoder sign**, a miswired motor, or a reversed command. Without it the loop reads a growing error, holds full speed and runs to the timeout — **metres of travel, not centimetres**. The encoder sign convention is UNVERIFIED, so this is the guard that makes the first bench run safe. |
+| **Agent dropout** | micro-ROS disconnect cancels any in-flight move. Without this `move_active` survives the outage and the segment **resumes on reconnect**, lurching into a command nobody is waiting on. |
 | **Timeout** | segment exceeds `expected_time × 3` → ABORT_TIMEOUT |
 | **Segment cap** | reject any move > `MAX_SEGMENT_COUNTS` (≈ 1.5 m) — guards against a bad computation driving the robot across the room |
 | **cmd_vel override** | any non-zero `cmd_vel` cancels the move (teleop e-stop) |

@@ -127,6 +127,39 @@ static uint32_t first_contact_ms = 0;   // millis() at FIRST sensor contact; 0 =
 // ---- cmd_vel watchdog ----
 volatile unsigned long last_cmd_vel_ms = 0;
 
+// ---- Position-control (segment) mode: /wheel_move ----
+// Docking drives the base by DISTANCE (encoder counts) instead of speed. See the block in
+// jupiter_config.h and docs/DOCK_POSITION_CONTROL_SPEC.md. Velocity mode is untouched: this is
+// a second, mutually-exclusive mode, entered only by a /wheel_move message.
+rcl_subscription_t wheel_move_subscriber;
+std_msgs__msg__Int32MultiArray wheel_move_msg;
+
+rcl_publisher_t wheel_move_state_publisher;
+std_msgs__msg__UInt8 wheel_move_state_msg;
+
+rcl_publisher_t wheel_move_remaining_publisher;
+std_msgs__msg__Int32MultiArray wheel_move_remaining_msg;
+
+enum : uint8_t {
+    MOVE_IDLE          = 0,
+    MOVE_RUNNING       = 1,
+    MOVE_DONE          = 2,
+    MOVE_ABORT_STALL   = 3,
+    MOVE_ABORT_TIMEOUT = 4,
+    MOVE_ABORT_REJECT  = 5,   // segment longer than MOVE_MAX_SEGMENT_CNT, or malformed
+    MOVE_ABORT_DIVERGE = 6    // error growing, not shrinking -> wrong direction (encoder sign?)
+};
+
+static volatile bool move_active   = false;   // true = POSITION mode, false = VELOCITY mode
+static uint8_t  move_state         = MOVE_IDLE;
+static int32_t  move_target_l = 0, move_target_r = 0;   // counts to travel (relative)
+static int32_t  move_origin_l = 0, move_origin_r = 0;   // encoder counts when the move started
+static float    move_max_rpm       = MOVE_DEFAULT_MAX_RPM;
+static float    move_rpm_l = 0.0f, move_rpm_r = 0.0f;   // slew-limited RPM commands
+static uint32_t move_start_ms = 0, move_timeout_ms = 0;
+static uint32_t move_progress_ms = 0, move_in_tol_since_ms = 0;
+static int32_t  move_prog_ref_l = 0, move_prog_ref_r = 0;   // last position that counted as progress
+
 rclc_support_t support;
 rcl_allocator_t allocator;
 rcl_node_t node;
@@ -263,6 +296,113 @@ void publish_battery()
 
 // ---- Motion ----
 
+// ---- Position-control (segment) mode helpers ----
+
+static inline int32_t absdiff32(int32_t a, int32_t b) { int32_t d = a - b; return d < 0 ? -d : d; }
+static inline int32_t iabs32(int32_t v)               { return v < 0 ? -v : v; }
+
+// End the current move and hand the base back to VELOCITY mode cleanly.
+// Re-arms the cmd_vel watchdog timestamp so a stale one can't instantly trip on return.
+static void moveFinish(uint8_t new_state)
+{
+    move_active = false;
+    move_state  = new_state;
+    move_rpm_l  = 0.0f;
+    move_rpm_r  = 0.0f;
+    target_linear_velocity   = 0;
+    target_linear_y_velocity = 0;
+    target_angular_velocity  = 0;
+    last_cmd_vel_ms = millis();
+}
+
+// One step of the position loop. Writes the per-wheel RPM setpoints that the EXISTING velocity
+// PID then tracks — this wraps that loop, it does not replace it. Returns false once the move
+// has terminated (for any reason), in which case the caller falls back to velocity mode.
+//
+// Both wheels are scaled by their SHARE of the remaining distance, so they finish together: a
+// rotation stays a rotation instead of one wheel arriving first and the robot arcing. Speed is
+// proportional to the LARGEST remaining error and capped, giving a clean deceleration into the
+// target over ~MOVE_DEFAULT_MAX_RPM / MOVE_K_POS counts.
+static bool positionStep(float dt, float *req_l, float *req_r)
+{
+    const uint32_t now_ms = millis();
+    const int32_t  cnt_l  = (int32_t)motor1_encoder.getCount();
+    const int32_t  cnt_r  = (int32_t)motor2_encoder.getCount();
+
+    const int32_t rem_l  = move_target_l - (cnt_l - move_origin_l);
+    const int32_t rem_r  = move_target_r - (cnt_r - move_origin_r);
+    const int32_t arem_l = iabs32(rem_l);
+    const int32_t arem_r = iabs32(rem_r);
+    const int32_t rem_max = (arem_l > arem_r) ? arem_l : arem_r;
+
+    // --- SEAT REFLEX: contact while reversing means we have ARRIVED at the dock, not failed.
+    if ((prox_left_contact && prox_right_contact) && (move_target_l < 0 || move_target_r < 0)) {
+        moveFinish(MOVE_DONE);
+        return false;
+    }
+
+    // --- ARRIVAL: both wheels inside tolerance, held briefly so we don't latch on a transient.
+    if (arem_l <= MOVE_DONE_TOL_COUNTS && arem_r <= MOVE_DONE_TOL_COUNTS) {
+        if (move_in_tol_since_ms == 0) move_in_tol_since_ms = now_ms;
+        if (now_ms - move_in_tol_since_ms >= MOVE_DONE_HOLD_MS) {
+            moveFinish(MOVE_DONE);
+            return false;
+        }
+    } else {
+        move_in_tol_since_ms = 0;
+    }
+
+    // --- STALL GUARD (mandatory: position mode suspends the cmd_vel watchdog, and a position
+    //     loop will push against a blocked wheel indefinitely without this).
+    if (absdiff32(cnt_l, move_prog_ref_l) >= MOVE_STALL_MIN_COUNTS ||
+        absdiff32(cnt_r, move_prog_ref_r) >= MOVE_STALL_MIN_COUNTS) {
+        move_prog_ref_l = cnt_l;
+        move_prog_ref_r = cnt_r;
+        move_progress_ms = now_ms;
+    } else if (now_ms - move_progress_ms > MOVE_STALL_MS) {
+        moveFinish(MOVE_ABORT_STALL);
+        return false;
+    }
+
+    // --- TIMEOUT GUARD
+    if (now_ms - move_start_ms > move_timeout_ms) {
+        moveFinish(MOVE_ABORT_TIMEOUT);
+        return false;
+    }
+
+    // --- DIVERGENCE GUARD: the remaining error must SHRINK. If it grows past where it started,
+    //     the wheel is travelling the wrong way — an inverted encoder sign, a miswired motor, or
+    //     a reversed command. Without this the loop reads a growing error, holds full speed and
+    //     runs until the timeout (metres, not centimetres). Fails fast instead.
+    if (arem_l > iabs32(move_target_l) + MOVE_DIVERGE_COUNTS ||
+        arem_r > iabs32(move_target_r) + MOVE_DIVERGE_COUNTS) {
+        moveFinish(MOVE_ABORT_DIVERGE);
+        return false;
+    }
+
+    // --- control law
+    float speed = MOVE_K_POS * (float)rem_max;          // decelerate as the target approaches
+    if (speed > move_max_rpm) speed = move_max_rpm;
+
+    float want_l = 0.0f, want_r = 0.0f;
+    if (rem_max > 0) {
+        want_l = speed * ((float)rem_l / (float)rem_max);   // share of remaining -> finish together
+        want_r = speed * ((float)rem_r / (float)rem_max);
+    }
+
+    // slew-limit to a trapezoidal profile so segments don't jerk the chassis
+    const float dv = MOVE_ACCEL_RPM_S * dt;
+    move_rpm_l += constrain(want_l - move_rpm_l, -dv, dv);
+    move_rpm_r += constrain(want_r - move_rpm_r, -dv, dv);
+
+    // NOTE: MOTOR1/2_TRIM deliberately NOT applied here. Trim compensates motor mismatch in the
+    // open-loop velocity path; in position mode the encoder counts are the authority and the
+    // loop corrects mismatch itself — trimming would corrupt the commanded distance.
+    *req_l = move_rpm_l;
+    *req_r = move_rpm_r;
+    return true;
+}
+
 // Duty scale that holds torque constant as the pack discharges (see jupiter_config.h).
 // Returns exactly 1.0 if the battery reading is missing or implausible, so a bad ADC can
 // never scale the motors up.
@@ -280,8 +420,21 @@ void moveBase(float dt)
     float current_rpm1, current_rpm2, current_rpm3, current_rpm4;
     float target_rpm1,  target_rpm2,  target_rpm3,  target_rpm4;
 
+    // ---- MODE ARBITRATION ----------------------------------------------------------------
+    // /cmd_vel is the ONLY channel Nav2 has to the motors, so position control is a separate,
+    // mutually-exclusive MODE rather than an addition to the velocity path. In position mode the
+    // cmd_vel watchdog below is deliberately SUSPENDED (nothing publishes cmd_vel during a move,
+    // so it would brake the wheels 400 ms in); positionStep()'s stall + timeout guards are its
+    // safety equivalent. Velocity mode is byte-for-byte the previous behaviour.
+    bool position_mode = false;
+    float pos_req_l = 0.0f, pos_req_r = 0.0f;
+    if (move_active) {
+        position_mode = positionStep(dt, &pos_req_l, &pos_req_r);
+    }
+
     // cmd_vel WATCHDOG: publisher died / network hiccup -> stop, don't latch the last command.
-    if (millis() - last_cmd_vel_ms > CMD_VEL_TIMEOUT_MS) {
+    // VELOCITY MODE ONLY — see the arbitration note above.
+    if (!position_mode && millis() - last_cmd_vel_ms > CMD_VEL_TIMEOUT_MS) {
         target_linear_velocity   = 0;
         target_linear_y_velocity = 0;
         target_angular_velocity  = 0;
@@ -306,12 +459,21 @@ void moveBase(float dt)
         target_angular_velocity = 0;
     }
 
-    Kinematics::MotorRPM req_rpm = kinematics.calculateRPM(
-        target_linear_velocity, target_linear_y_velocity, target_angular_velocity);
+    Kinematics::MotorRPM req_rpm;
+    if (position_mode) {
+        // Setpoints come from the position loop; the velocity PID below tracks them unchanged.
+        req_rpm.motor1 = pos_req_l;
+        req_rpm.motor2 = pos_req_r;
+        req_rpm.motor3 = 0.0f;
+        req_rpm.motor4 = 0.0f;
+    } else {
+        req_rpm = kinematics.calculateRPM(
+            target_linear_velocity, target_linear_y_velocity, target_angular_velocity);
 
-    // Apply per-motor trim to the TARGET RPM (not PWM output) so PID cannot compensate it away.
-    req_rpm.motor1 *= MOTOR1_TRIM;
-    req_rpm.motor2 *= MOTOR2_TRIM;
+        // Apply per-motor trim to the TARGET RPM (not PWM output) so PID cannot compensate it away.
+        req_rpm.motor1 *= MOTOR1_TRIM;
+        req_rpm.motor2 *= MOTOR2_TRIM;
+    }
 
     current_rpm1 = motor1_encoder.getRPM();
     current_rpm2 = motor2_encoder.getRPM();
@@ -320,7 +482,11 @@ void moveBase(float dt)
     current_rpm3 = 0.0f;
     current_rpm4 = 0.0f;
 
-    if (target_linear_velocity == 0 && target_linear_y_velocity == 0 && target_angular_velocity == 0) {
+    // Idle brake — VELOCITY MODE ONLY. Must not fire in position mode: the cmd_vel setpoints are
+    // not the control variable there and are typically zero, so this would brake the wheels for
+    // the whole segment (and again during every ramp through zero).
+    if (!position_mode &&
+        target_linear_velocity == 0 && target_linear_y_velocity == 0 && target_angular_velocity == 0) {
         motor1_pid.compute(req_rpm.motor1, current_rpm1, dt);
         motor2_pid.compute(req_rpm.motor2, current_rpm2, dt);
         target_rpm1 = 0.0f;
@@ -407,6 +573,63 @@ void cmdVelCallback(const void * msgin)
     target_linear_y_velocity = msg->linear.y;
     target_angular_velocity  = msg->angular.z;
     last_cmd_vel_ms = millis();   // feed the watchdog
+
+    // A NON-ZERO cmd_vel always wins: it cancels any in-flight position move and drops straight
+    // back to velocity mode. This is what keeps teleop usable as an e-stop while a segment runs.
+    // A zero cmd_vel does NOT cancel — velocity_smoother and idle publishers emit zeros
+    // continuously, and those must not kill a docking segment.
+    if (move_active &&
+        (msg->linear.x != 0.0 || msg->linear.y != 0.0 || msg->angular.z != 0.0)) {
+        move_active = false;
+        move_state  = MOVE_IDLE;
+        move_rpm_l  = 0.0f;
+        move_rpm_r  = 0.0f;
+    }
+}
+
+// /wheel_move — [counts_left, counts_right, (optional) max_rpm]. RELATIVE counts from wherever
+// the wheels are now, so there is no shared origin to drift. A new message supersedes any
+// in-flight move (last command wins).
+void wheelMoveCallback(const void * msgin)
+{
+    const std_msgs__msg__Int32MultiArray * msg = (const std_msgs__msg__Int32MultiArray *)msgin;
+    if (msg->data.size < 2) { moveFinish(MOVE_ABORT_REJECT); return; }
+
+    const int32_t counts_l = msg->data.data[0];
+    const int32_t counts_r = msg->data.data[1];
+
+    // Reject absurd segments — guards against a bad computation driving the robot across the room.
+    if (iabs32(counts_l) > MOVE_MAX_SEGMENT_CNT || iabs32(counts_r) > MOVE_MAX_SEGMENT_CNT) {
+        moveFinish(MOVE_ABORT_REJECT);
+        return;
+    }
+
+    move_max_rpm = (msg->data.size >= 3 && msg->data.data[2] > 0)
+                   ? (float)msg->data.data[2] : MOVE_DEFAULT_MAX_RPM;
+    const float rpm_ceiling = (float)MOTOR_MAX_RPM * (float)MAX_RPM_RATIO;
+    if (move_max_rpm > rpm_ceiling) move_max_rpm = rpm_ceiling;
+
+    move_origin_l = (int32_t)motor1_encoder.getCount();
+    move_origin_r = (int32_t)motor2_encoder.getCount();
+    move_target_l = counts_l;
+    move_target_r = counts_r;
+    move_prog_ref_l = move_origin_l;
+    move_prog_ref_r = move_origin_r;
+
+    // Generous completion budget: expected time at the speed cap, x factor, with a 1 s floor.
+    const int32_t longest = (iabs32(counts_l) > iabs32(counts_r)) ? iabs32(counts_l) : iabs32(counts_r);
+    const float   revs    = (float)longest / (float)COUNTS_PER_REV1;
+    const float   secs    = (move_max_rpm > 0.1f) ? (revs / (move_max_rpm / 60.0f)) : 1.0f;
+    move_timeout_ms = (uint32_t)(secs * 1000.0f * MOVE_TIMEOUT_FACTOR) + 1000;
+
+    const uint32_t now_ms = millis();
+    move_start_ms        = now_ms;
+    move_progress_ms     = now_ms;
+    move_in_tol_since_ms = 0;
+    move_rpm_l = 0.0f;
+    move_rpm_r = 0.0f;
+    move_state  = MOVE_RUNNING;
+    move_active = true;
 }
 
 void timerCallback(rcl_timer_t *timer, int64_t last_call_time)
@@ -458,6 +681,16 @@ void timerCallback(rcl_timer_t *timer, int64_t last_call_time)
     // Dock contact state: bit0 = left prox, bit1 = right prox (3 = seated square).
     dock_contact_msg.data = (prox_left_contact ? 1 : 0) | (prox_right_contact ? 2 : 0);
     RCSOFTCHECK(rcl_publish(&dock_contact_publisher, &dock_contact_msg, NULL));
+
+    // Position-mode telemetry: the aligner waits on state to sequence its segments.
+    wheel_move_state_msg.data = move_state;
+    RCSOFTCHECK(rcl_publish(&wheel_move_state_publisher, &wheel_move_state_msg, NULL));
+
+    wheel_move_remaining_msg.data.data[0] =
+        move_active ? (move_target_l - ((int32_t)motor1_encoder.getCount() - move_origin_l)) : 0;
+    wheel_move_remaining_msg.data.data[1] =
+        move_active ? (move_target_r - ((int32_t)motor2_encoder.getCount() - move_origin_r)) : 0;
+    RCSOFTCHECK(rcl_publish(&wheel_move_remaining_publisher, &wheel_move_remaining_msg, NULL));
 }
 
 // ---- micro-ROS entity lifecycle ----
@@ -508,18 +741,38 @@ bool create_entities()
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Empty),
         "/save_imu"));
 
+    // Position-control (segment) mode — see jupiter_config.h and DOCK_POSITION_CONTROL_SPEC.md
+    CREATE_CHECK(rclc_subscription_init_default(
+        &wheel_move_subscriber, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32MultiArray),
+        "/wheel_move"));
+
+    CREATE_CHECK(rclc_publisher_init_default(
+        &wheel_move_state_publisher, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
+        "/wheel_move_state"));
+
+    CREATE_CHECK(rclc_publisher_init_default(
+        &wheel_move_remaining_publisher, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32MultiArray),
+        "/wheel_move_remaining"));
+
     CREATE_CHECK(rclc_timer_init_default(
         &timer, &support,
         RCL_MS_TO_NS(20),
         timerCallback));
 
-    // Handles: 1 timer + 2 subscriptions
-    CREATE_CHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
+    // Handles: 1 timer + 3 subscriptions. MUST match the number added below — rclc silently
+    // drops anything beyond the declared count, so a stale value here makes /wheel_move look
+    // connected while its callback never fires.
+    CREATE_CHECK(rclc_executor_init(&executor, &support.context, 4, &allocator));
     CREATE_CHECK(rclc_executor_add_timer(&executor, &timer));
     CREATE_CHECK(rclc_executor_add_subscription(
         &executor, &cmd_vel_subscriber, &cmd_vel_msg, &cmdVelCallback, ON_NEW_DATA));
     CREATE_CHECK(rclc_executor_add_subscription(
         &executor, &save_imu_subscriber, &save_imu_msg, &saveImuCallback, ON_NEW_DATA));
+    CREATE_CHECK(rclc_executor_add_subscription(
+        &executor, &wheel_move_subscriber, &wheel_move_msg, &wheelMoveCallback, ON_NEW_DATA));
 
     return true;
 }
@@ -536,8 +789,11 @@ void destroy_entities()
     (void)rcl_publisher_fini(&speed_publisher,   &node);
     (void)rcl_publisher_fini(&battery_publisher, &node);
     (void)rcl_publisher_fini(&dock_contact_publisher, &node);
+    (void)rcl_publisher_fini(&wheel_move_state_publisher,     &node);
+    (void)rcl_publisher_fini(&wheel_move_remaining_publisher, &node);
     (void)rcl_subscription_fini(&cmd_vel_subscriber,  &node);
     (void)rcl_subscription_fini(&save_imu_subscriber, &node);
+    (void)rcl_subscription_fini(&wheel_move_subscriber, &node);
     (void)rcl_timer_fini(&timer);
     (void)rclc_executor_fini(&executor);
     (void)rcl_node_fini(&node);
@@ -598,6 +854,24 @@ void setup()
     speed_msg.data.capacity = 5;
     speed_msg.data.data     = (float_t *)malloc(5 * sizeof(float_t));
 
+    // /wheel_move INCOMING buffer. micro-ROS will not allocate for an unbounded sequence on
+    // receive — without capacity here the deserialiser drops or overruns the message.
+    // [counts_left, counts_right, max_rpm, flags] = 4 elements, plus a dim slot for the layout.
+    wheel_move_msg.data.size         = 0;
+    wheel_move_msg.data.capacity     = 4;
+    wheel_move_msg.data.data         = (int32_t *)malloc(4 * sizeof(int32_t));
+    wheel_move_msg.layout.dim.size     = 0;
+    wheel_move_msg.layout.dim.capacity = 1;
+    wheel_move_msg.layout.dim.data     =
+        (std_msgs__msg__MultiArrayDimension *)malloc(sizeof(std_msgs__msg__MultiArrayDimension));
+    wheel_move_msg.layout.dim.data[0].label.size     = 0;
+    wheel_move_msg.layout.dim.data[0].label.capacity = 24;
+    wheel_move_msg.layout.dim.data[0].label.data     = (char *)malloc(24);
+
+    wheel_move_remaining_msg.data.size     = 2;
+    wheel_move_remaining_msg.data.capacity = 2;
+    wheel_move_remaining_msg.data.data     = (int32_t *)malloc(2 * sizeof(int32_t));
+
     // Transport is set once; support/node/entities are rebuilt on each reconnect.
     set_microros_serial_transports(Serial);
 }
@@ -643,6 +917,13 @@ void loop()
 
         case AGENT_DISCONNECTED:
             destroy_entities();
+            // Cancel any in-flight position move. Without this move_active survives the outage
+            // and the segment RESUMES on reconnect — the robot would lurch into a stale command
+            // issued before the link dropped, with no one waiting on it.
+            move_active = false;
+            move_state  = MOVE_IDLE;
+            move_rpm_l  = 0.0f;
+            move_rpm_r  = 0.0f;
             target_linear_velocity   = 0;
             target_linear_y_velocity = 0;
             target_angular_velocity  = 0;
