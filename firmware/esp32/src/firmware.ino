@@ -341,15 +341,22 @@ static bool positionStep(float dt, float *req_l, float *req_r)
         return false;
     }
 
-    // --- ARRIVAL: both wheels inside tolerance, held briefly so we don't latch on a transient.
-    if (arem_l <= MOVE_DONE_TOL_COUNTS && arem_r <= MOVE_DONE_TOL_COUNTS) {
+    // --- ARRIVAL: LATCHED. Once both wheels are inside tolerance we stop commanding and simply
+    //     hold zero until DONE. The latch matters: with a minimum speed floor, un-latching on a
+    //     few counts of drift would re-command MOVE_MIN_RPM and hunt around the target forever.
+    //     Same hard-stop-inside-the-deadband rule the in-place SQUARE state uses.
+    if (move_in_tol_since_ms != 0 ||
+        (arem_l <= MOVE_DONE_TOL_COUNTS && arem_r <= MOVE_DONE_TOL_COUNTS)) {
         if (move_in_tol_since_ms == 0) move_in_tol_since_ms = now_ms;
+        *req_l = 0.0f;
+        *req_r = 0.0f;
+        move_rpm_l = 0.0f;
+        move_rpm_r = 0.0f;
         if (now_ms - move_in_tol_since_ms >= MOVE_DONE_HOLD_MS) {
             moveFinish(MOVE_DONE);
             return false;
         }
-    } else {
-        move_in_tol_since_ms = 0;
+        return true;   // holding still inside the deadband — skip the stall guard below
     }
 
     // --- STALL GUARD (mandatory: position mode suspends the cmd_vel watchdog, and a position
@@ -380,9 +387,13 @@ static bool positionStep(float dt, float *req_l, float *req_r)
         return false;
     }
 
-    // --- control law
+    // --- control law: proportional, but never below the speed the drivetrain can actually
+    //     execute. A pure proportional law crawls to a halt short of target (measured: 1.6 RPM
+    //     asked at 27 counts remaining -> wheels dead -> stall abort at 73/100). Floor first,
+    //     then the caller's cap, so an explicit max_rpm is still respected.
     float speed = MOVE_K_POS * (float)rem_max;          // decelerate as the target approaches
-    if (speed > move_max_rpm) speed = move_max_rpm;
+    if (speed < MOVE_MIN_RPM)   speed = MOVE_MIN_RPM;   // ...but keep the wheels actually turning
+    if (speed > move_max_rpm)   speed = move_max_rpm;
 
     float want_l = 0.0f, want_r = 0.0f;
     if (rem_max > 0) {

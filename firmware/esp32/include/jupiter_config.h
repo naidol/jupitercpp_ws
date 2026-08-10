@@ -119,7 +119,19 @@
                                        // proportional band = MAX_RPM / K_POS ~= 420 counts (~10 cm) of deceleration
 #define MOVE_DEFAULT_MAX_RPM  25.0f    // segment speed cap when the command doesn't specify one
 #define MOVE_ACCEL_RPM_S      60.0f    // slew limit on the RPM command (trapezoidal profile, no jerk)
-#define MOVE_DONE_TOL_COUNTS  8        // |error| within this = arrived (8 counts ~= 2 mm)
+// MINIMUM SPEED FLOOR — measured 2026-08-10, first live position-mode test.
+// A pure proportional law decelerates into a crawl the drivetrain cannot execute: at 27 counts
+// remaining it asked for 1.6 RPM, the wheels stopped dead, and the stall guard (correctly) fired
+// at 73/100 counts. Same failure the in-place SQUARE state hit years earlier, and the same fix:
+// hold a floor speed while outside the deadband, then hard-stop inside it. Must sit ABOVE
+// MOTOR_FF_RELEASE_RPM (4.0) so the breakaway kick is not chattering across its gate.
+#define MOVE_MIN_RPM          6.0f     // never command slower than this while outside tolerance
+#define MOVE_DONE_TOL_COUNTS  20       // |error| within this = arrived (20 counts ~= 5 mm ~= 1.6 deg
+                                       // of rotation). Widened from 8: with a 6 RPM floor the wheel
+                                       // carries ~20 counts of stopping lag, and chasing a tighter
+                                       // band just makes it hunt. Residual is corrected by the
+                                       // OUTER loop (reflector re-measure), which is the whole point
+                                       // of the segmented design.
 #define MOVE_DONE_HOLD_MS     100      // must stay in tolerance this long before DONE
 #define MOVE_STALL_MS         700      // no progress for this long -> ABORT_STALL
 #define MOVE_STALL_MIN_COUNTS 3        // progress smaller than this counts as "no progress"
