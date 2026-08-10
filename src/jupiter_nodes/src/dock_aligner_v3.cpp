@@ -102,13 +102,37 @@ public:
     // Flips the rotation convention wholesale. Derived value is +1 (see the AIM block); if the
     // first AIM segment makes the offset GROW instead of shrink, set this to -1.0 and re-test.
     aim_sign_         = declare_parameter("aim_sign",         1.0);
+    // ARC steering (2026-08-10). In-place rotation is the WORST move this chassis can make: the
+    // single rear caster sits 180 mm behind the drive axle, so a pivot demands it swivel 90 deg
+    // from rest under load -- it behaves as a locked skid and the segment stalls. Measured: three
+    // consecutive AIM segments (60/54/57 counts) stalled with the robot barely moving, while every
+    // straight DRIVE completed. So turn WHILE MOVING: over an arc of radius R the caster only
+    // swivels atan(0.180/R) -- about 5 deg at R=2 m, 13 deg at R=0.8 m. That keeps the robot in
+    // the regime that demonstrably works, and folds AIM+DRIVE into one primitive.
+    arc_gain_         = declare_parameter("arc_gain",         1.0);   // fraction of the aim error corrected per segment
+    min_turn_radius_  = declare_parameter("min_turn_radius",  0.80);  // m — caps curvature -> caps caster swivel
+    pivot_fallback_   = declare_parameter("pivot_fallback_deg", 25.0) * M_PI / 180.0;
     commit_range_     = declare_parameter("commit_range",     0.40);   // below this: no more re-aim, drive in
     max_segments_     = declare_parameter("max_segments",     25);     // don't loop forever
 
-    // --- target pose. MEASURED on a real seat (from dock_aligner_v2): the reflector reads this
-    // when the robot is properly docked. The final segment drives (d - seated_range).
-    seated_range_m_   = declare_parameter("seated_range_m",   0.1937);
+    // --- target pose. RE-MEASURED 2026-08-10 with the THREE-strip detector by hand-pushing the
+    // robot until both prox latched (contact=3): range 0.1962, lateral +0.0039, skew +1.25 deg
+    // over four stable samples. Note this is within 2.5 mm of V2's two-strip value (0.1937), so
+    // the seated reference was NOT the cause of the short stop -- force was.
+    seated_range_m_   = declare_parameter("seated_range_m",   0.1962);
     seat_settle_s_    = declare_parameter("seat_settle_s",    2.0);
+    // FINAL PUSH (measured 2026-08-10): at 12 rpm (0.063 m/s) the robot stopped 12 mm short of
+    // the seat with NO prox contact -- a gentle creep cannot overcome the funnel rails'
+    // steel-on-PLA friction. V1 used 0.14 m/s for exactly this. And OVERDRIVE past the nominal
+    // seated range: the firmware's prox reflex ends the move the instant both sensors confirm, so
+    // aiming deliberately deep lets CONTACT be what stops us instead of a distance estimate. If
+    // contact never comes, the move simply stalls -- which we already treat as arrival.
+    // 22 -> 40: a BLOCKED wheel pushes with duty ~ K_P * commanded_rpm, so the commanded speed
+    // sets the force, not just the speed. 22 rpm gave ~11 % duty and could not close the last
+    // 10 mm; 40 rpm roughly doubles it. Paired with MOVE_STALL_MS 700 -> 1200 in the firmware,
+    // which stops the stall guard cutting the push off before the integral adds its share.
+    commit_rpm_       = declare_parameter("commit_rpm",       40);
+    commit_overdrive_m_ = declare_parameter("commit_overdrive_m", 0.030);
 
     // --- gating / safety
     min_confidence_   = declare_parameter("min_confidence",   0.70);
@@ -210,22 +234,22 @@ private:
   }
 
   // ---- segment issue ----
-  void issue_segment(int32_t counts_l, int32_t counts_r, const char* what) {
+  void issue_segment(int32_t counts_l, int32_t counts_r, const char* what, double rpm) {
     seg_issue_time_ = now();
     seg_saw_running_ = false;
     seg_desc_ = what;
     segments_++;
     if (dry_run_) {
       RCLCPP_WARN(get_logger(), "[DRY RUN] would issue %s: L=%+d R=%+d @%drpm",
-                  what, counts_l, counts_r, static_cast<int>(seg_rpm_));
+                  what, counts_l, counts_r, static_cast<int>(rpm));
       set_state(PLAN);      // pretend it completed instantly
       return;
     }
     std_msgs::msg::Int32MultiArray msg;
-    msg.data = {counts_l, counts_r, static_cast<int32_t>(seg_rpm_)};
+    msg.data = {counts_l, counts_r, static_cast<int32_t>(rpm)};
     move_pub_->publish(msg);
     RCLCPP_INFO(get_logger(), "seg %d: %s  L=%+d R=%+d @%drpm",
-                segments_, what, counts_l, counts_r, static_cast<int>(seg_rpm_));
+                segments_, what, counts_l, counts_r, static_cast<int>(rpm));
     set_state(WAIT_SEG);
   }
 
@@ -313,38 +337,57 @@ private:
         // --- COMMIT: inside this range stop re-aiming and drive the remaining distance in.
         //     The funnel rails absorb the residual angle; steering here would fight them.
         if (d <= commit_range_) {
-          const double drive = d - seated_range_m_;
+          // Aim PAST the nominal seat: the firmware's prox reflex ends the move the moment both
+          // sensors confirm, so let CONTACT stop us rather than a distance estimate. Firmer rpm
+          // too -- a gentle creep cannot beat the rails' friction.
+          const double drive = d - seated_range_m_ + commit_overdrive_m_;
           if (drive <= 0.005) { seat_wait_start_ = t; set_state(SEAT_WAIT); return; }
           committed_ = true;
           const int32_t c = static_cast<int32_t>(-drive * counts_per_m_);   // reverse = negative
-          RCLCPP_INFO(get_logger(), "COMMIT at d=%.3f offset=%+.3f aim=%+.1fdeg -> final drive %.3f m",
-                      d, offset, aim * 180.0 / M_PI, drive);
-          issue_segment(c, c, "COMMIT drive");
+          RCLCPP_INFO(get_logger(),
+            "COMMIT at d=%.3f offset=%+.3f aim=%+.1fdeg -> push %.3f m (incl %.3f overdrive) @%drpm",
+            d, offset, aim * 180.0 / M_PI, drive, commit_overdrive_m_, static_cast<int>(commit_rpm_));
+          issue_segment(c, c, "COMMIT drive", commit_rpm_);
           return;
         }
 
-        // --- AIM: rotate in place to point the rear at the centreline carrot.
-        // SIGN (derived, then verify on hardware — this is the classic trap on this robot):
-        //   pure rotation by theta:  s_L = -theta*W/2,  s_R = +theta*W/2
-        //   firmware kinematics:     motor1(L) = vx - wz*W,  motor2(R) = vx + wz*W
-        //   => CCW (+theta) is LEFT BACKWARD, RIGHT FORWARD, i.e. counts (-c, +c).
-        // A rear-right carrot gives aim > 0 and needs CCW, so positive aim -> (-c, +c).
-        // aim_sign flips the whole convention if the hardware disagrees; if the offset GROWS
-        // instead of shrinking on the first AIM segment, set aim_sign:=-1.0.
-        if (std::fabs(aim) > aim_tol_) {
+        // --- PIVOT FALLBACK: only for gross misalignment, where no arc can recover inside the
+        //     remaining distance. Known to be unreliable on this chassis (90 deg caster swivel
+        //     from rest) -- it is a last resort, not the normal path.
+        //     SIGN (verified in dry run + on hardware): pure rotation is s_L = -theta*W/2,
+        //     s_R = +theta*W/2; firmware has motor1(L) = vx - wz*W, so CCW is LEFT BACKWARD,
+        //     RIGHT FORWARD = counts (-c, +c). A rear-right carrot gives aim > 0 and needs CCW.
+        if (std::fabs(aim) > pivot_fallback_) {
           const int32_t c = static_cast<int32_t>(aim_sign_ * aim * counts_per_rad_);
-          RCLCPP_INFO(get_logger(), "AIM %+.1f deg (d=%.3f offset=%+.3f)",
-                      aim * 180.0 / M_PI, d, offset);
-          issue_segment(-c, c, "AIM rotate");
+          RCLCPP_WARN(get_logger(),
+            "aim %+.1f deg exceeds arc authority — PIVOT fallback (may stall: caster must swivel)",
+            aim * 180.0 / M_PI);
+          issue_segment(-c, c, "PIVOT rotate", seg_rpm_);
           return;
         }
 
-        // --- DRIVE: straight back along the axis, one capped segment at a time.
-        const double drive = std::min(seg_len_m_, d - commit_range_ + 0.05);
-        const int32_t c = static_cast<int32_t>(-drive * counts_per_m_);
-        RCLCPP_INFO(get_logger(), "DRIVE %.3f m (d=%.3f offset=%+.3f aim=%+.1fdeg)",
-                    drive, d, offset, aim * 180.0 / M_PI);
-        issue_segment(c, c, "DRIVE straight");
+        // --- ARC: turn WHILE reversing. One primitive replaces AIM+DRIVE.
+        //     Centre travel is -s (reversing); rotation theta is applied across it:
+        //         s_L = -s - theta*W/2      s_R = -s + theta*W/2
+        //     which reduces to the pivot form above when s = 0, so the sign convention is shared.
+        //     Curvature is capped by min_turn_radius so the caster is never asked for a large
+        //     swivel: theta_max = s / R_min.
+        const double s_travel = std::min(seg_len_m_, d - commit_range_ + 0.05);
+        double theta = aim_sign_ * arc_gain_ * aim;
+        const double theta_max = s_travel / min_turn_radius_;
+        theta = clampd(theta, -theta_max, theta_max);
+
+        const double half   = 0.5 * wheel_separation_;
+        const int32_t cl = static_cast<int32_t>((-s_travel - theta * half) * counts_per_m_);
+        const int32_t cr = static_cast<int32_t>((-s_travel + theta * half) * counts_per_m_);
+        const double  radius = (std::fabs(theta) > 1e-6) ? (s_travel / std::fabs(theta)) : 999.0;
+        RCLCPP_INFO(get_logger(),
+          "ARC %.3f m turning %+.1f deg (R=%.2fm, caster swivel ~%.0f deg) "
+          "[d=%.3f offset=%+.3f aim=%+.1f]",
+          s_travel, theta * 180.0 / M_PI, radius,
+          std::atan(0.180 / std::max(0.2, radius)) * 180.0 / M_PI,
+          d, offset, aim * 180.0 / M_PI);
+        issue_segment(cl, cr, "ARC", seg_rpm_);
         return;
       }
 
@@ -429,7 +472,8 @@ private:
               move_cmd_topic_, move_state_topic_, state_topic_;
   double counts_per_m_, wheel_separation_, counts_per_rad_;
   double seg_len_m_, seg_rpm_, aim_tol_, aim_sign_, commit_range_, max_segments_;
-  double seated_range_m_, seat_settle_s_;
+  double arc_gain_, min_turn_radius_, pivot_fallback_;
+  double seated_range_m_, seat_settle_s_, commit_rpm_, commit_overdrive_m_;
   double min_confidence_, reflector_stale_s_, acquire_stable_s_, acquire_timeout_s_,
          overall_timeout_s_, seg_ack_timeout_s_, max_stall_retries_,
          max_lateral_m_, max_start_range_m_, control_hz_;

@@ -130,7 +130,12 @@
 // at 73/100 counts. Same failure the in-place SQUARE state hit years earlier, and the same fix:
 // hold a floor speed while outside the deadband, then hard-stop inside it. Must sit ABOVE
 // MOTOR_FF_RELEASE_RPM (4.0) so the breakaway kick is not chattering across its gate.
-#define MOVE_MIN_RPM          6.0f     // never command slower than this while outside tolerance
+// 6.0 -> 10.0 (2026-08-10, live floor test): SHORT segments stall. A 76-count rotation sits
+// entirely inside the deceleration band (MAX_RPM/K_POS = 200 counts), so it commands exactly
+// MOVE_MIN_RPM for its whole length -- and 6 RPM cannot break stiction under the robot's weight.
+// Two consecutive AIM segments (76 and 38 counts) died this way. Wheels-up they were fine; load
+// is what changes it.
+#define MOVE_MIN_RPM          10.0f    // never command slower than this while outside tolerance
 #define MOVE_DONE_TOL_COUNTS  20       // |error| within this = arrived (20 counts ~= 5 mm ~= 1.6 deg
                                        // of rotation). Widened from 8: with a 6 RPM floor the wheel
                                        // carries ~20 counts of stopping lag, and chasing a tighter
@@ -138,7 +143,12 @@
                                        // OUTER loop (reflector re-measure), which is the whole point
                                        // of the segmented design.
 #define MOVE_DONE_HOLD_MS     100      // must stay in tolerance this long before DONE
-#define MOVE_STALL_MS         700      // no progress for this long -> ABORT_STALL
+// 700 -> 1200 (2026-08-10, live dock): the final push stalled 10 mm short of the seat. When a
+// wheel is blocked the duty it pushes with is K_P * commanded_rpm plus whatever the integral has
+// built -- and at ~20 PWM/s the integral needs SECONDS. A 700 ms window killed the push before
+// the force could develop. 1200 ms lets it build while still bounded well short of anything that
+// would cook a motor.
+#define MOVE_STALL_MS         1200     // no progress for this long -> ABORT_STALL
 #define MOVE_STALL_MIN_COUNTS 3        // progress smaller than this counts as "no progress"
 #define MOVE_MAX_SEGMENT_CNT  6200     // reject any segment longer than this (~1.5 m) — guards
                                        // against a bad computation driving across the room
