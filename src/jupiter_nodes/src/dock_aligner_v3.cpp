@@ -463,6 +463,18 @@ private:
             abort_reason_ = "firmware REJECTED the segment (too long / malformed)";
             set_state(ABORT); return;
           case MV_TIMEOUT:
+            // A timeout WHILE COMMITTED means the same as a stall while committed: we are at the
+            // dock and the rails are what slowed us. Measured 2026-08-10: pushing through the
+            // funnel the robot CREEPS, making >MOVE_STALL_MIN_COUNTS of progress inside every
+            // stall window, so the stall guard never fires -- it runs out the segment budget
+            // instead. Treating this as a hard abort skipped SEAT_WAIT entirely and meant the
+            // seat nudge never ran, with contact=2 sitting right there.
+            if (committed_ || refl_range_ < commit_range_) {
+              RCLCPP_WARN(get_logger(),
+                "segment timeout while committed (range %.3f, contact=%u) — treating as arrival.",
+                refl_range_, contact_mask_);
+              seat_wait_start_ = t; set_state(SEAT_WAIT); return;
+            }
             abort_reason_ = "firmware segment TIMEOUT"; set_state(ABORT); return;
           default:
             RCLCPP_WARN(get_logger(), "unexpected move_state %s (%u) — re-planning",
