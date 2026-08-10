@@ -99,6 +99,9 @@ public:
     seg_len_m_        = declare_parameter("seg_len_m",        0.25);   // straight segment cap
     seg_rpm_          = declare_parameter("seg_rpm",          12);     // precision speed: overshoot scales with this
     aim_tol_          = declare_parameter("aim_tol_deg",      2.0) * M_PI / 180.0;
+    // Flips the rotation convention wholesale. Derived value is +1 (see the AIM block); if the
+    // first AIM segment makes the offset GROW instead of shrink, set this to -1.0 and re-test.
+    aim_sign_         = declare_parameter("aim_sign",         1.0);
     commit_range_     = declare_parameter("commit_range",     0.40);   // below this: no more re-aim, drive in
     max_segments_     = declare_parameter("max_segments",     25);     // don't loop forever
 
@@ -321,12 +324,18 @@ private:
         }
 
         // --- AIM: rotate in place to point the rear at the centreline carrot.
+        // SIGN (derived, then verify on hardware — this is the classic trap on this robot):
+        //   pure rotation by theta:  s_L = -theta*W/2,  s_R = +theta*W/2
+        //   firmware kinematics:     motor1(L) = vx - wz*W,  motor2(R) = vx + wz*W
+        //   => CCW (+theta) is LEFT BACKWARD, RIGHT FORWARD, i.e. counts (-c, +c).
+        // A rear-right carrot gives aim > 0 and needs CCW, so positive aim -> (-c, +c).
+        // aim_sign flips the whole convention if the hardware disagrees; if the offset GROWS
+        // instead of shrinking on the first AIM segment, set aim_sign:=-1.0.
         if (std::fabs(aim) > aim_tol_) {
-          const int32_t c = static_cast<int32_t>(aim * counts_per_rad_);
-          // wheels opposite: +c/-c rotates one way, the sign of `aim` picks which
+          const int32_t c = static_cast<int32_t>(aim_sign_ * aim * counts_per_rad_);
           RCLCPP_INFO(get_logger(), "AIM %+.1f deg (d=%.3f offset=%+.3f)",
                       aim * 180.0 / M_PI, d, offset);
-          issue_segment(c, -c, "AIM rotate");
+          issue_segment(-c, c, "AIM rotate");
           return;
         }
 
@@ -419,7 +428,7 @@ private:
   std::string reflector_topic_, confidence_topic_, contact_topic_,
               move_cmd_topic_, move_state_topic_, state_topic_;
   double counts_per_m_, wheel_separation_, counts_per_rad_;
-  double seg_len_m_, seg_rpm_, aim_tol_, commit_range_, max_segments_;
+  double seg_len_m_, seg_rpm_, aim_tol_, aim_sign_, commit_range_, max_segments_;
   double seated_range_m_, seat_settle_s_;
   double min_confidence_, reflector_stale_s_, acquire_stable_s_, acquire_timeout_s_,
          overall_timeout_s_, seg_ack_timeout_s_, max_stall_retries_,
