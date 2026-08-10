@@ -117,7 +117,12 @@
 // safety equivalent and are therefore NOT optional.
 #define MOVE_K_POS            0.060f   // RPM commanded per count of remaining error
                                        // proportional band = MAX_RPM / K_POS ~= 420 counts (~10 cm) of deceleration
-#define MOVE_DEFAULT_MAX_RPM  25.0f    // segment speed cap when the command doesn't specify one
+// MEASURED 2026-08-10: at 18 RPM a wheel overshot its target by 161 counts (~39 mm) and then
+// STALLED trying to correct back. Cause is the velocity loop's slow settling (4-9 s, see the K_P
+// note above) -- it cannot follow a fast deceleration ramp, so it sails past. Overshoot scales
+// with segment speed, so precision segments must be SLOW. 12 RPM roughly halves it; raise only
+// if a segment is long and accuracy at its end does not matter.
+#define MOVE_DEFAULT_MAX_RPM  12.0f    // segment speed cap when the command doesn't specify one
 #define MOVE_ACCEL_RPM_S      60.0f    // slew limit on the RPM command (trapezoidal profile, no jerk)
 // MINIMUM SPEED FLOOR — measured 2026-08-10, first live position-mode test.
 // A pure proportional law decelerates into a crawl the drivetrain cannot execute: at 27 counts
@@ -182,7 +187,14 @@
 #define PWM_MIN -PWM_MAX
 #define USE_PID true                        // true = PID controller ON. Switch OFF (false). See Note (1) below
 #define WHEEL_RADIUS 0.050                  // in meters (100mm AGV wheels, installed 2026-07-11; was 0.0325/65mm rubber)
-#define WHEEL_SEPARATION 0.355              // centre-to-centre, meters (100mm AGV wheels: 0.385 out-out minus one 30mm wheel width; was 0.346)
+// CALIBRATED 2026-08-10 (was 0.355, a geometric estimate: 0.385 out-out minus one 30mm wheel
+// width). Measured by rotating in place and comparing DELIVERED differential encoder counts
+// against BNO055 yaw -- not commanded vs actual, which is polluted by overshoot and stalls.
+// Three segments gave 0.3583 / 0.3590 / 0.3585 m, spread 0.21 %. The old value made every
+// commanded angle 1.02 % small. theta = (sR - sL)/W, so this scales ALL rotation: position-mode
+// turns, Nav2's angular commands, and the odometry's reported angular_z (which was
+// under-reporting rotation by the same 1 %). 25.70 differential counts per degree.
+#define WHEEL_SEPARATION 0.3586             // centre-to-centre, meters — CALIBRATED, do not "tidy" back to a round number
 #define WHEEL_BASE 0.180                    // <-- ADD THIS: distance from front axle to rear axle in meters
 #define PWM_FWD_MIN 1                       // these two PWM_FWD & PWM_REV are needed to balance the startup power needed
 #define PWM_REV_MIN 1                       // for each direction (helps to drive straight)  [REVERTED 2026-07-11: floor/kick experiments made drive worse — see project memory]
