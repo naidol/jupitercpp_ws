@@ -55,6 +55,7 @@ add_executable(dock_range src/dock_range.cpp)
 add_executable(dock_reflector src/dock_reflector.cpp)
 add_executable(dock_aligner src/dock_aligner.cpp)
 add_executable(dock_aligner_v2 src/dock_aligner_v2.cpp)
+add_executable(dock_aligner_v3 src/dock_aligner_v3.cpp)
 add_executable(webcam_publisher src/webcam_publisher.cpp)
 # Link ROS2 dependencies
 ament_target_dependencies(scan_deskew_node
@@ -88,6 +89,13 @@ ament_target_dependencies(dock_aligner
 )
 
 ament_target_dependencies(dock_aligner_v2
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  std_srvs
+)
+ament_target_dependencies(dock_aligner_v3
   rclcpp
   std_msgs
   sensor_msgs
@@ -206,6 +214,7 @@ install(TARGETS
   dock_reflector
   dock_aligner
   dock_aligner_v2
+  dock_aligner_v3
   webcam_publisher
   DESTINATION lib/${PROJECT_NAME}
 )
