@@ -341,12 +341,20 @@ static bool positionStep(float dt, float *req_l, float *req_r)
         return false;
     }
 
-    // --- ARRIVAL: LATCHED. Once both wheels are inside tolerance we stop commanding and simply
-    //     hold zero until DONE. The latch matters: with a minimum speed floor, un-latching on a
-    //     few counts of drift would re-command MOVE_MIN_RPM and hunt around the target forever.
-    //     Same hard-stop-inside-the-deadband rule the in-place SQUARE state uses.
-    if (move_in_tol_since_ms != 0 ||
-        (arem_l <= MOVE_DONE_TOL_COUNTS && arem_r <= MOVE_DONE_TOL_COUNTS)) {
+    // --- ARRIVAL: LATCHED, and a wheel counts as arrived if it is inside tolerance OR has
+    //     OVERSHOT (remaining flipped sign relative to its target). Measured on the floor
+    //     2026-08-10: a wheel that sails past target leaves the loop commanding a small REVERSE
+    //     correction, and MOVE_MIN_RPM cannot break stiction from a dead stop under load -- so
+    //     it sat still and the stall guard fired even though the segment had travelled its full
+    //     distance. Never chase a small overshoot backwards; the OUTER loop (reflector
+    //     re-measure between segments) exists precisely to absorb it.
+    //     The latch itself still matters: with a speed floor, un-latching on a few counts of
+    //     drift would re-command MOVE_MIN_RPM and hunt forever.
+    const bool arrived_l = (arem_l <= MOVE_DONE_TOL_COUNTS) ||
+                           (move_target_l != 0 && ((rem_l < 0) != (move_target_l < 0)));
+    const bool arrived_r = (arem_r <= MOVE_DONE_TOL_COUNTS) ||
+                           (move_target_r != 0 && ((rem_r < 0) != (move_target_r < 0)));
+    if (move_in_tol_since_ms != 0 || (arrived_l && arrived_r)) {
         if (move_in_tol_since_ms == 0) move_in_tol_since_ms = now_ms;
         *req_l = 0.0f;
         *req_r = 0.0f;
