@@ -109,9 +109,16 @@ public:
     // straight DRIVE completed. So turn WHILE MOVING: over an arc of radius R the caster only
     // swivels atan(0.180/R) -- about 5 deg at R=2 m, 13 deg at R=0.8 m. That keeps the robot in
     // the regime that demonstrably works, and folds AIM+DRIVE into one primitive.
-    arc_gain_         = declare_parameter("arc_gain",         1.0);   // fraction of the aim error corrected per segment
+    arc_gain_         = declare_parameter("arc_gain",         0.6);   // fraction of the aim error corrected per segment
     min_turn_radius_  = declare_parameter("min_turn_radius",  0.80);  // m — caps curvature -> caps caster swivel
     pivot_fallback_   = declare_parameter("pivot_fallback_deg", 25.0) * M_PI / 180.0;
+    // CARROT LOOKAHEAD. look = max(look_min, look_frac * axis_distance). The floor matters more
+    // than it looks: with only 0.15 m the carrot sits very close as the robot closes in, so the
+    // SAME lateral offset produces a much larger aim angle and the loop over-reacts exactly when
+    // it should be settling. Measured 2026-08-10: aim swung +17.9 -> -18.4 deg between segments,
+    // leaving +2.9 deg of skew at the seat and only one prox engaged.
+    look_min_         = declare_parameter("look_min",         0.35);
+    look_frac_        = declare_parameter("look_frac",        0.5);
     commit_range_     = declare_parameter("commit_range",     0.40);   // below this: no more re-aim, drive in
     max_segments_     = declare_parameter("max_segments",     25);     // don't loop forever
 
@@ -133,6 +140,17 @@ public:
     // which stops the stall guard cutting the push off before the integral adds its share.
     commit_rpm_       = declare_parameter("commit_rpm",       40);
     commit_overdrive_m_ = declare_parameter("commit_overdrive_m", 0.030);
+    // SEAT NUDGE. Arriving square but a few mm off centre leaves ONE rear corner off its plate
+    // (measured 2026-08-10: skew +0.7 deg, lateral -0.008 -> contact=2, right seated). Pivot
+    // about the SEATED corner to swing the open one in, while still easing inward. Unlike a
+    // free-space pivot -- which stalls on this chassis because the caster must swivel 90 deg --
+    // one corner is already against the dock, so the dock provides the pivot point.
+    // Sign is DERIVED, matching V1: contact=1 (LEFT seated, right open) -> CW, i.e. theta < 0;
+    // contact=2 (RIGHT seated, left open) -> CCW, theta > 0.
+    nudge_deg_        = declare_parameter("nudge_deg",        3.0);
+    nudge_push_m_     = declare_parameter("nudge_push_m",     0.015);
+    nudge_rpm_        = declare_parameter("nudge_rpm",        30);
+    max_nudges_       = declare_parameter("max_nudges",       3);
 
     // --- gating / safety
     min_confidence_   = declare_parameter("min_confidence",   0.70);
@@ -179,17 +197,25 @@ public:
   }
 
 private:
-  enum State { IDLE, ACQUIRE, PLAN, WAIT_SEG, SEAT_WAIT, SEATED, ABORT };
+  enum State { IDLE, ACQUIRE, PLAN, WAIT_SEG, SEAT_WAIT, SEAT_NUDGE, SEATED, ABORT };
   const char* state_name(State s) const {
     switch (s) { case IDLE: return "IDLE"; case ACQUIRE: return "ACQUIRE"; case PLAN: return "PLAN";
                  case WAIT_SEG: return "WAIT_SEG"; case SEAT_WAIT: return "SEAT_WAIT";
+                 case SEAT_NUDGE: return "SEAT_NUDGE";
                  case SEATED: return "SEATED"; default: return "ABORT"; }
   }
   void set_state(State s) {
     state_ = s;
     std_msgs::msg::String m; m.data = state_name(s);
     state_pub_->publish(m);
-    RCLCPP_INFO(get_logger(), "state -> %s", state_name(s));
+    // Always surface WHY we aborted. Storing the reason and never printing it made a live abort
+    // undiagnosable (2026-08-10) — the run just ended with no explanation in the log.
+    if (s == ABORT && !abort_reason_.empty()) {
+      RCLCPP_ERROR(get_logger(), "state -> ABORT: %s  [contact=%u range=%.3f offset=%+.3f]",
+                   abort_reason_.c_str(), contact_mask_, refl_range_, offset_from_axis());
+    } else {
+      RCLCPP_INFO(get_logger(), "state -> %s", state_name(s));
+    }
   }
 
   // ---- inputs ----
@@ -227,7 +253,7 @@ private:
   double rear_aim_error() const {
     const double nx = std::cos(refl_nyaw_), ny = std::sin(refl_nyaw_);
     const double s_r = -(refl_along_ * nx + refl_lateral_ * ny);
-    const double look = std::max(0.15, 0.5 * axis_distance());
+    const double look = std::max(look_min_, look_frac_ * axis_distance());
     const double cx = refl_along_   + (s_r - look) * nx;
     const double cy = refl_lateral_ + (s_r - look) * ny;
     return wrap_pi(std::atan2(cy, cx) - M_PI);
@@ -269,7 +295,7 @@ private:
     if (std::fabs(offset_from_axis()) > max_lateral_m_) {
       res->success = false; res->message = "too far off the dock axis — restage"; return;
     }
-    segments_ = 0; stall_retries_ = 0;
+    segments_ = 0; stall_retries_ = 0; nudges_ = 0; committed_ = false;
     start_time_ = now(); acquire_start_ = now();
     valid_since_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
     set_state(ACQUIRE);
@@ -439,8 +465,8 @@ private:
           case MV_TIMEOUT:
             abort_reason_ = "firmware segment TIMEOUT"; set_state(ABORT); return;
           default:
-            RCLCPP_WARN(get_logger(), "unexpected move_state %s — re-planning",
-                        move_state_name(move_state_));
+            RCLCPP_WARN(get_logger(), "unexpected move_state %s (%u) — re-planning",
+                        move_state_name(move_state_), move_state_);
             set_state(PLAN); return;
         }
       }
@@ -453,10 +479,24 @@ private:
         }
         if ((t - seat_wait_start_).seconds() > seat_settle_s_) {
           if ((contact_mask_ & 0x03) != 0) {
+            if (nudges_ < static_cast<int>(max_nudges_)) {
+              // ONE corner is down. Pivot about it to bring the other in.
+              const bool left_seated = (contact_mask_ & 0x01) != 0;
+              const double theta = (left_seated ? -1.0 : +1.0) * nudge_deg_ * M_PI / 180.0;
+              const double half  = 0.5 * wheel_separation_;
+              const int32_t cl = static_cast<int32_t>((-nudge_push_m_ - theta * half) * counts_per_m_);
+              const int32_t cr = static_cast<int32_t>((-nudge_push_m_ + theta * half) * counts_per_m_);
+              nudges_++;
+              RCLCPP_WARN(get_logger(),
+                "partial seat (contact=%u, left=%d right=%d) — NUDGE %d/%d: pivot %+.1f deg about the seated corner",
+                contact_mask_, (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0,
+                nudges_, static_cast<int>(max_nudges_), theta * 180.0 / M_PI);
+              issue_segment(cl, cr, "SEAT nudge", nudge_rpm_);
+              return;
+            }
             RCLCPP_WARN(get_logger(),
-              "partial seat (contact=%u, left=%d right=%d) after %.1fs — accepting honestly.",
-              contact_mask_, (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0,
-              seat_settle_s_);
+              "partial seat (contact=%u, left=%d right=%d) after %d nudges — accepting honestly.",
+              contact_mask_, (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0, nudges_);
             set_state(SEATED); return;
           }
           abort_reason_ = "reached the seat with NO prox contact — arrived off-centre";
@@ -472,8 +512,9 @@ private:
               move_cmd_topic_, move_state_topic_, state_topic_;
   double counts_per_m_, wheel_separation_, counts_per_rad_;
   double seg_len_m_, seg_rpm_, aim_tol_, aim_sign_, commit_range_, max_segments_;
-  double arc_gain_, min_turn_radius_, pivot_fallback_;
+  double arc_gain_, min_turn_radius_, pivot_fallback_, look_min_, look_frac_;
   double seated_range_m_, seat_settle_s_, commit_rpm_, commit_overdrive_m_;
+  double nudge_deg_, nudge_push_m_, nudge_rpm_, max_nudges_;
   double min_confidence_, reflector_stale_s_, acquire_stable_s_, acquire_timeout_s_,
          overall_timeout_s_, seg_ack_timeout_s_, max_stall_retries_,
          max_lateral_m_, max_start_range_m_, control_hz_;
@@ -483,7 +524,7 @@ private:
   bool    refl_valid_{false}, seg_saw_running_{false}, committed_{false};
   double  refl_along_{0}, refl_lateral_{0}, refl_range_{0}, refl_nyaw_{0}, confidence_{0};
   uint8_t contact_mask_{0}, move_state_{MV_IDLE};
-  int     segments_{0}, stall_retries_{0};
+  int     segments_{0}, stall_retries_{0}, nudges_{0};
   std::string seg_desc_, abort_reason_;
   rclcpp::Time last_refl_time_{0,0,RCL_ROS_TIME}, acquire_start_{0,0,RCL_ROS_TIME},
                valid_since_{0,0,RCL_ROS_TIME}, start_time_{0,0,RCL_ROS_TIME},
