@@ -1,11 +1,40 @@
 # ACTIVE TASK — Reverse Docking (handover brief)
 
-**Date:** 2026-08-05 · **Status:** ❌ not working · **Attempts:** 4 generations, ~10 live runs over 2 sessions
+**Date:** 2026-08-05, updated 2026-08-10
 **Full project context:** [`JUPITER_FULL_STATUS_2026-08-05.md`](JUPITER_FULL_STATUS_2026-08-05.md)
 
-> **Read §1 before proposing anything.** The obvious first move on this problem — tune the controller
-> gains — has already been done exhaustively and is measurably a dead end. Starting there will waste
-> days of real hardware time.
+> ## ✅ SOLVED 2026-08-10 — `dock_aligner_v3` docked autonomously (`contact=3`)
+>
+> ```
+> seg 1  ARC 0.250 m  +2.8 deg  DONE
+> seg 2  ARC 0.250 m  +6.7 deg  DONE
+> seg 3  ARC 0.146 m  -0.6 deg  DONE   (offset corrected to -0.000)
+> seg 4  COMMIT 0.181 m @40rpm  -> both prox seated MID-SEGMENT
+> final: range 0.196 (seated 0.1962), lateral -0.005, skew -1.4 deg
+> ```
+>
+> Four segments, zero stalls, both proximity sensors. **`contact=3` gates the ESP32 IR beacon,
+> which closes the dock SSR — so the robot can now put itself on charge.**
+>
+> **What made it work, in order of contribution:**
+> 1. **POSITION control instead of velocity** (Logan's proposal). Steering as a differential
+>    DISTANCE is geometry; it does not care that the velocity loop takes 4-9 s to settle — which
+>    is exactly what killed V1/V2, whose corrections expired before the firmware executed them.
+> 2. **ARC segments instead of in-place pivots** — from Logan's correction that this chassis has
+>    ONE rear caster, not two. A pivot demands a 90 deg caster swivel from rest and stalled in
+>    100 % of attempts; an arc asks for ~2-9 deg and completed 10 of 11.
+> 3. Damped arc loop (`arc_gain 0.6`, `look_min 0.35`) so the aim error stops amplifying close in.
+> 4. Calibrated `WHEEL_SEPARATION` (0.3586, measured) so commanded angles are real.
+>
+> **NOT established — this is ONE dock from a good staging pose (~1.0 m, roughly centred):**
+> - **Repeatability** across varied staging (off-axis, skewed, caster wherever)
+> - **`cmd_vel` override** (the e-stop path) — still unverified
+> - The wheels-down `±90°` IMU acceptance test in §7 — never run
+> - `SEAT_NUDGE` — written but never executed; the approach was clean enough not to need it
+>
+> §3's "disproven" list remains valid **for velocity control** and is kept as the record of why
+> that path was abandoned. **§1 is still the most useful part of this document** — but note its
+> mechanism was superseded: see the correction below.
 
 ---
 
@@ -49,6 +78,24 @@ develop.
 > gains, then caster mechanics, then firmware structure — before anyone held a test long enough to
 > watch the loop converge. When a plant "won't respond", measure how long it takes to respond
 > before concluding it can't.
+>
+> 3. **⭐ 2026-08-10 — "leading caster instability / shimmy" was ALSO wrong** (Claude, repeatedly).
+>    This chassis has **ONE rear caster, not two** (Logan's correction; confirmed in
+>    `firmware.ino`, "rear caster config"). It sits **180 mm behind the drive axle**, so an
+>    **in-place rotation requires it to swivel 90° from rest under load** — it behaves as a locked
+>    skid, and the segment stalls. Turning **while moving** only asks for `atan(0.180/R)`:
+>
+>    | manoeuvre | caster swivel | outcome |
+>    |---|---|---|
+>    | straight drive | 0° | ✅ always completed |
+>    | arc, R = 3.6 m | ~3° | ✅ |
+>    | arc, R = 0.8 m | ~13° | ✅ |
+>    | **in-place pivot** | **90°** | ❌ stalled every attempt |
+>
+>    This retires a long-running misdiagnosis: the "caster drift" blamed for months, the ±2°
+>    rotation scatter, and the pivot stalls are **one phenomenon** — a single trailing caster being
+>    asked to swivel. Not instability, not shimmy. **Design rule: never command an in-place pivot
+>    on this chassis. Turn while moving.**
 
 **Consequence:** the blocker is a **firmware gain fix** (§6), not a control-law redesign and not
 mechanical. The control laws in §3 failed because they were all issuing corrections shorter than

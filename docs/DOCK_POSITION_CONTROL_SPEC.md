@@ -1,7 +1,15 @@
 # Position-Control Docking — Design Spec (for review, nothing built)
 
-**Date:** 2026-08-08 · **Status:** 🔨 **ESP32 side IMPLEMENTED + COMPILES — NOT FLASHED, NEVER RUN**
-(aligner side §5 still unwritten; `W` calibration §3 still outstanding)
+**Date:** 2026-08-08 · **Status:** ✅ **BUILT, FLASHED AND PROVEN — autonomous dock achieved 2026-08-10**
+
+> Firmware position mode and `dock_aligner_v3` both live on the robot. First autonomous
+> `contact=3` on 2026-08-10 (4 segments, 0 stalls). `W` calibration (§3) done: **0.3586 m measured**.
+>
+> **One correction to this spec, learned on hardware:** §5's aligner sketch used *rotate-in-place
+> then drive straight*. **In-place rotation does not work on this chassis** — the single rear
+> caster, 180 mm behind the drive axle, must swivel 90° from rest and acts as a locked skid.
+> Every pivot stalled. The shipped design uses **ARC segments** (turn while moving), which ask for
+> only ~2-13° of caster swivel. See `dock_aligner_v3.cpp` and `ACTIVE_TASK.md` §1.
 **Origin:** Logan's proposal, after the velocity loop was measured at 4–9 s to reach a commanded
 wheel speed ([`DOCKING_HANDOVER_2026-08-08.md`](DOCKING_HANDOVER_2026-08-08.md) §8).
 
