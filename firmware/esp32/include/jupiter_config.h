@@ -135,7 +135,14 @@
 // MOVE_MIN_RPM for its whole length -- and 6 RPM cannot break stiction under the robot's weight.
 // Two consecutive AIM segments (76 and 38 counts) died this way. Wheels-up they were fine; load
 // is what changes it.
-#define MOVE_MIN_RPM          10.0f    // never command slower than this while outside tolerance
+// 10 -> 20 (2026-08-11). The floor MUST sit above the breakaway threshold or it does nothing.
+// Measured this session: arcs stall at 16 rpm and complete at 25. But speed = K_POS * remaining
+// FLOORED at MOVE_MIN_RPM and only THEN capped by the commanded max -- so a SHORT segment never
+// reaches its cap. A 100-count seat nudge asked for 0.06*100 = 6 rpm, was floored to 10, and its
+// "30 rpm" cap never applied: three consecutive nudges stalled without moving the robot at all.
+// 20 keeps short segments above the threshold; the overshoot it costs is absorbed by the
+// arrived-on-overshoot latch and corrected by the outer loop.
+#define MOVE_MIN_RPM          20.0f    // never command slower than this while outside tolerance
 #define MOVE_DONE_TOL_COUNTS  20       // |error| within this = arrived (20 counts ~= 5 mm ~= 1.6 deg
                                        // of rotation). Widened from 8: with a 6 RPM floor the wheel
                                        // carries ~20 counts of stopping lag, and chasing a tighter

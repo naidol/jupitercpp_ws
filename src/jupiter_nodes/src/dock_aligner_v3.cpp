@@ -96,8 +96,31 @@ public:
     counts_per_rad_  = declare_parameter("counts_per_rad", (0.3586 / 2.0) * 4106.3);  // ~736.3
 
     // --- segment shaping
-    seg_len_m_        = declare_parameter("seg_len_m",        0.25);   // straight segment cap
-    seg_rpm_          = declare_parameter("seg_rpm",          12);     // precision speed: overshoot scales with this
+    // SEGMENT LENGTH is the OUTER LOOP'S SAMPLING INTERVAL — the dock is only re-measured
+    // BETWEEN segments (inside one, the firmware drives on encoders alone and is blind to the
+    // dock). So a 0.25 m segment means the dock is sampled every 250 mm. Close in, that is far
+    // too coarse: the whole final approach got ONE look.
+    // Logan, 2026-08-11: stalls cluster on the FIRST move after a long rest, not on subsequent
+    // ones — T2 ran 4 segments with zero stalls, and yesterday's runs stalled only on segment 1.
+    // Strictly it is not momentum carrying through (the firmware BRAKES between segments, both
+    // bridge inputs HIGH), it is that stiction has not re-set and the caster is still trailing
+    // correctly after a ~200 ms pause. Either way short segments are cheap, so sample far more
+    // often where it matters.
+    seg_len_m_        = declare_parameter("seg_len_m",        0.25);   // segment cap, far out
+    seg_len_close_m_  = declare_parameter("seg_len_close_m",  0.10);   // segment cap, close in
+    seg_close_range_  = declare_parameter("seg_close_range",  0.60);   // below this range, use the short cap
+    // STALL ESCALATION (2026-08-11). Cold-start stiction is the dominant failure: T1 and T3 both
+    // stalled 3x on the FIRST move after the robot had been standing, while T2 -- run immediately
+    // after the robot had been driven -- completed every segment. The retries were useless
+    // because each one re-issued at the SAME rpm, so it was three identical attempts against the
+    // same stiction. Each retry now escalates the commanded speed, which in this scheme escalates
+    // the FORCE a stopped wheel pushes with (duty ~ K_P * rpm + FF).
+    stall_rpm_boost_  = declare_parameter("stall_rpm_boost",  0.6);    // +60 % of base rpm per retry
+    // 12 -> 25 (2026-08-11, measured). At 16 rpm EVERY arc segment stalled and every boosted
+    // retry at 25 completed -- three of each, no ambiguity. 16 is simply below this robot's
+    // breakaway threshold on this floor; arcs need more than straights because the differential
+    // means one wheel is always doing less. At 25 the whole approach ran 4/4 with zero stalls.
+    seg_rpm_          = declare_parameter("seg_rpm",          25);     // precision speed: overshoot scales with this
     aim_tol_          = declare_parameter("aim_tol_deg",      2.0) * M_PI / 180.0;
     // Flips the rotation convention wholesale. Derived value is +1 (see the AIM block); if the
     // first AIM segment makes the offset GROW instead of shrink, set this to -1.0 and re-test.
@@ -119,14 +142,25 @@ public:
     // leaving +2.9 deg of skew at the seat and only one prox engaged.
     look_min_         = declare_parameter("look_min",         0.35);
     look_frac_        = declare_parameter("look_frac",        0.5);
-    commit_range_     = declare_parameter("commit_range",     0.40);   // below this: no more re-aim, drive in
+    // COMMIT_RANGE is where the robot goes BLIND to the dock for good. The rails argument only
+    // applies INSIDE the throat (~0.28 m) — committing at 0.40 left a 12 cm band with no sensor
+    // AND no rails guiding anything, which is where the 2026-08-11 left-rail strike happened
+    // (entered the commit at offset -0.019, came out 23 mm and 12 deg off). The detector is still
+    // excellent down there — 127 points at 0.95 confidence at 0.196 m — so that was good data
+    // being discarded at the moment it mattered most. Commit at the throat, not before it.
+    commit_range_     = declare_parameter("commit_range",     0.30);   // below this: no more re-aim, drive in
     max_segments_     = declare_parameter("max_segments",     25);     // don't loop forever
 
-    // --- target pose. RE-MEASURED 2026-08-10 with the THREE-strip detector by hand-pushing the
-    // robot until both prox latched (contact=3): range 0.1962, lateral +0.0039, skew +1.25 deg
-    // over four stable samples. Note this is within 2.5 mm of V2's two-strip value (0.1937), so
-    // the seated reference was NOT the cause of the short stop -- force was.
-    seated_range_m_   = declare_parameter("seated_range_m",   0.1962);
+    // --- target pose. RE-MEASURED 2026-08-11, robot hand-seated at contact=3, 6 samples:
+    // along -0.19292, lateral -0.00476, skew -0.70 deg -> nyaw +0.712 deg, and the value V3
+    // actually steers on, AXIS DISTANCE = 0.1930 m.
+    //
+    // The same capture the day before read lateral +0.0039; today -0.0048 -- the SIGN FLIPPED
+    // between two valid seatings. So the dock has roughly +-5 mm of lateral play when seated,
+    // and there is no precise lateral target worth aiming at. offset_from_axis at the seat came
+    // out +2.36 mm; that is deliberately NOT used as a target, because it is inside the noise.
+    // Only the axis distance is repeatable enough to calibrate on.
+    seated_range_m_   = declare_parameter("seated_range_m",   0.1930);
     seat_settle_s_    = declare_parameter("seat_settle_s",    2.0);
     // FINAL PUSH (measured 2026-08-10): at 12 rpm (0.063 m/s) the robot stopped 12 mm short of
     // the seat with NO prox contact -- a gentle creep cannot overcome the funnel rails'
@@ -134,11 +168,14 @@ public:
     // seated range: the firmware's prox reflex ends the move the instant both sensors confirm, so
     // aiming deliberately deep lets CONTACT be what stops us instead of a distance estimate. If
     // contact never comes, the move simply stalls -- which we already treat as arrival.
-    // 22 -> 40: a BLOCKED wheel pushes with duty ~ K_P * commanded_rpm, so the commanded speed
-    // sets the force, not just the speed. 22 rpm gave ~11 % duty and could not close the last
-    // 10 mm; 40 rpm roughly doubles it. Paired with MOVE_STALL_MS 700 -> 1200 in the firmware,
+    // Commanded RPM sets BOTH the force a blocked wheel pushes with (duty ~ K_P * rpm) AND the
+    // speed the robot enters the funnel at -- they are coupled in this scheme, which is the
+    // tension here. 22 was too weak to close the last 10 mm. 40 seated once, then on 2026-08-11
+    // carried the robot into the LEFT RAIL at ~0.21 m/s: it entered the commit at offset -0.019
+    // and came out 23 mm and 12 deg off, having been deflected inside the throat. 30 keeps most
+    // of the force while cutting the entry energy. Paired with MOVE_STALL_MS 1200 in firmware,
     // which stops the stall guard cutting the push off before the integral adds its share.
-    commit_rpm_       = declare_parameter("commit_rpm",       40);
+    commit_rpm_       = declare_parameter("commit_rpm",       30);
     commit_overdrive_m_ = declare_parameter("commit_overdrive_m", 0.030);
     // SEAT NUDGE. Arriving square but a few mm off centre leaves ONE rear corner off its plate
     // (measured 2026-08-10: skew +0.7 deg, lateral -0.008 -> contact=2, right seated). Pivot
@@ -150,7 +187,30 @@ public:
     nudge_deg_        = declare_parameter("nudge_deg",        3.0);
     nudge_push_m_     = declare_parameter("nudge_push_m",     0.015);
     nudge_rpm_        = declare_parameter("nudge_rpm",        30);
-    max_nudges_       = declare_parameter("max_nudges",       3);
+    // Nudging is DISABLED by default (was 3). Proven ineffective 2026-08-11: with one corner
+    // seated and the tongue in the throat there is nothing to pivot about -- three nudges at
+    // 20 rpm (~26 % duty) did not move the robot at all. The robot must be FREED before it can
+    // be corrected, which is what the back-off retry below does.
+    max_nudges_       = declare_parameter("max_nudges",       0);
+
+    // BACK-OFF RETRY (Logan's call, 2026-08-11). On a partial seat, reverse OUT far enough to be
+    // clear of the throat and above commit_range, then re-plan and re-approach. Rationale: the
+    // residual error at the seat is HEADING, not position -- a run reached lateral -0.0007 m
+    // (0.7 mm!) but 2.2 deg of skew, and 2.2 deg across the ~300 mm prox spacing is ~11 mm at the
+    // corners, past an inductive sensor's ~8 mm range. That skew is geometrically coupled to the
+    // residual offset through the carrot lookahead, so it cannot be nudged out in place -- but a
+    // fresh approach from a freed position gets another attempt at nulling it.
+    // TWO mechanisms, cheapest first (Logan, 2026-08-11):
+    //   SHORT back-off (~50 mm) + straight re-push -> unjams and gives the funnel RAILS another
+    //       go at squaring the robot on re-entry. No sensor involved, ~2 s.
+    //   LONG back-off (past commit_range) + full re-approach -> sensor-guided correction, ~15 s.
+    //       Only worth it if the short retry fails, and it is useless if the residual skew turns
+    //       out to be SYSTEMATIC (the same approach would just reproduce it).
+    short_backoff_m_    = declare_parameter("short_backoff_m",    0.05);
+    short_backoff_tries_= declare_parameter("short_backoff_tries", 2);
+    max_seat_retries_ = declare_parameter("max_seat_retries", 3);     // total, short + long
+    backoff_target_m_ = declare_parameter("backoff_target_m", 0.38);  // LONG back-off target range
+    backoff_rpm_      = declare_parameter("backoff_rpm",      25);
 
     // --- gating / safety
     min_confidence_   = declare_parameter("min_confidence",   0.70);
@@ -190,9 +250,9 @@ public:
 
     set_state(IDLE);
     RCLCPP_INFO(get_logger(),
-      "dock_aligner_v3 (SEGMENTED/POSITION, UNTESTED) ready. seg=%.2fm @%drpm aim_tol=%.1fdeg "
+      "dock_aligner_v3 (SEGMENTED/POSITION) ready. seg=%.2f/%.2fm @%drpm aim_tol=%.1fdeg "
       "commit=%.2fm seated_range=%.4fm counts/m=%.1f counts/rad=%.1f%s. Call /dock/v3/align_start.",
-      seg_len_m_, static_cast<int>(seg_rpm_), aim_tol_ * 180.0 / M_PI, commit_range_,
+      seg_len_m_, seg_len_close_m_, static_cast<int>(seg_rpm_), aim_tol_ * 180.0 / M_PI, commit_range_,
       seated_range_m_, counts_per_m_, counts_per_rad_, dry_run_ ? "  [DRY RUN]" : "");
   }
 
@@ -295,7 +355,7 @@ private:
     if (std::fabs(offset_from_axis()) > max_lateral_m_) {
       res->success = false; res->message = "too far off the dock axis — restage"; return;
     }
-    segments_ = 0; stall_retries_ = 0; nudges_ = 0; committed_ = false;
+    segments_ = 0; stall_retries_ = 0; nudges_ = 0; seat_retries_ = 0; committed_ = false;
     start_time_ = now(); acquire_start_ = now();
     valid_since_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
     set_state(ACQUIRE);
@@ -360,6 +420,10 @@ private:
           abort_reason_ = "drifted off the dock axis"; set_state(ABORT); return;
         }
 
+        // Escalate speed (= force) on each stall retry; resets to base after any DONE segment.
+        // Declared here so COMMIT, PIVOT and ARC can all use it.
+        const double eff_rpm = std::min(60.0, seg_rpm_ * (1.0 + stall_rpm_boost_ * stall_retries_));
+
         // --- COMMIT: inside this range stop re-aiming and drive the remaining distance in.
         //     The funnel rails absorb the residual angle; steering here would fight them.
         if (d <= commit_range_) {
@@ -388,7 +452,7 @@ private:
           RCLCPP_WARN(get_logger(),
             "aim %+.1f deg exceeds arc authority — PIVOT fallback (may stall: caster must swivel)",
             aim * 180.0 / M_PI);
-          issue_segment(-c, c, "PIVOT rotate", seg_rpm_);
+          issue_segment(-c, c, "PIVOT rotate", eff_rpm);
           return;
         }
 
@@ -398,7 +462,10 @@ private:
         //     which reduces to the pivot form above when s = 0, so the sign convention is shared.
         //     Curvature is capped by min_turn_radius so the caster is never asked for a large
         //     swivel: theta_max = s / R_min.
-        const double s_travel = std::min(seg_len_m_, d - commit_range_ + 0.05);
+        // Sample the dock more often as we close in — segment length IS the outer loop's
+        // sampling interval (see the seg_len note above).
+        const double cap = (d <= seg_close_range_) ? seg_len_close_m_ : seg_len_m_;
+        const double s_travel = std::min(cap, d - commit_range_ + 0.05);
         double theta = aim_sign_ * arc_gain_ * aim;
         const double theta_max = s_travel / min_turn_radius_;
         theta = clampd(theta, -theta_max, theta_max);
@@ -408,12 +475,13 @@ private:
         const int32_t cr = static_cast<int32_t>((-s_travel + theta * half) * counts_per_m_);
         const double  radius = (std::fabs(theta) > 1e-6) ? (s_travel / std::fabs(theta)) : 999.0;
         RCLCPP_INFO(get_logger(),
-          "ARC %.3f m turning %+.1f deg (R=%.2fm, caster swivel ~%.0f deg) "
+          "ARC %.3f m turning %+.1f deg (R=%.2fm, caster swivel ~%.0f deg) @%drpm%s "
           "[d=%.3f offset=%+.3f aim=%+.1f]",
           s_travel, theta * 180.0 / M_PI, radius,
           std::atan(0.180 / std::max(0.2, radius)) * 180.0 / M_PI,
+          static_cast<int>(eff_rpm), stall_retries_ ? " [BOOSTED]" : "",
           d, offset, aim * 180.0 / M_PI);
-        issue_segment(cl, cr, "ARC", seg_rpm_);
+        issue_segment(cl, cr, "ARC", eff_rpm);
         return;
       }
 
@@ -439,12 +507,27 @@ private:
           case MV_DONE:
             RCLCPP_INFO(get_logger(), "seg %d (%s) DONE", segments_, seg_desc_.c_str());
             stall_retries_ = 0;
+            // After a SHORT back-off we are committed but NOT at the dock — drive straight back
+            // in rather than sitting in SEAT_WAIT waiting for a contact that cannot come.
+            if (committed_ && seg_desc_ == "BACK-OFF short") {
+              const double push = short_backoff_m_ + commit_overdrive_m_;
+              const int32_t c = static_cast<int32_t>(-push * counts_per_m_);
+              RCLCPP_INFO(get_logger(), "re-pushing %.3f m after short back-off", push);
+              issue_segment(c, c, "RE-PUSH", commit_rpm_);
+              return;
+            }
             if (committed_) { seat_wait_start_ = t; set_state(SEAT_WAIT); }
             else            { set_state(PLAN); }
             return;
           case MV_STALL:
             // A stall near the seat is usually ARRIVAL, not failure — the dock is stopping us.
-            if (committed_ || refl_range_ < commit_range_) {
+            // Only a COMMITTED segment may be treated as arrival. Being merely NEAR the dock is
+            // not the same as having made the final push -- 2026-08-11 an ordinary arc happened
+            // to end below commit_range, the old "|| refl_range_ < commit_range_" clause declared
+            // arrival, and the COMMIT segment was never issued at all. The robot sat 64 mm short
+            // with nothing driving it in. If we are close but not committed, re-plan: PLAN will
+            // immediately issue the COMMIT because d <= commit_range.
+            if (committed_) {
               RCLCPP_WARN(get_logger(), "stall while committed (range %.3f) — treating as arrival.",
                           refl_range_);
               seat_wait_start_ = t; set_state(SEAT_WAIT); return;
@@ -469,11 +552,19 @@ private:
             // stall window, so the stall guard never fires -- it runs out the segment budget
             // instead. Treating this as a hard abort skipped SEAT_WAIT entirely and meant the
             // seat nudge never ran, with contact=2 sitting right there.
-            if (committed_ || refl_range_ < commit_range_) {
+            // Same rule as the stall case: only a COMMITTED segment counts as arrival.
+            if (committed_) {
               RCLCPP_WARN(get_logger(),
                 "segment timeout while committed (range %.3f, contact=%u) — treating as arrival.",
                 refl_range_, contact_mask_);
               seat_wait_start_ = t; set_state(SEAT_WAIT); return;
+            }
+            // Not committed but a segment timed out near the dock -> re-plan so COMMIT can run.
+            if (refl_range_ < commit_range_ + 0.05) {
+              RCLCPP_WARN(get_logger(),
+                "segment timeout at range %.3f (not yet committed) — re-planning to COMMIT.",
+                refl_range_);
+              set_state(PLAN); return;
             }
             abort_reason_ = "firmware segment TIMEOUT"; set_state(ABORT); return;
           default:
@@ -506,9 +597,33 @@ private:
               issue_segment(cl, cr, "SEAT nudge", nudge_rpm_);
               return;
             }
+            // BACK OFF and try the approach again from a position where the robot is FREE.
+            if (seat_retries_ < static_cast<int>(max_seat_retries_)) {
+              seat_retries_++;
+              nudges_ = 0;
+              const bool use_short = (seat_retries_ <= static_cast<int>(short_backoff_tries_));
+              double back;
+              if (use_short) {
+                // SHORT: just unjam. committed_ STAYS true so the next PLAN drives straight back
+                // in and the rails get another go at squaring it. No re-approach, no sensor.
+                back = short_backoff_m_;
+              } else {
+                // LONG: clear the throat and get above commit_range so PLAN actually re-approaches.
+                back = std::max(0.06, backoff_target_m_ - refl_range_);
+                committed_ = false;
+              }
+              const int32_t c = static_cast<int32_t>(+back * counts_per_m_);   // POSITIVE = away
+              RCLCPP_WARN(get_logger(),
+                "partial seat (contact=%u, left=%d right=%d) — %s BACK-OFF %d/%d: out %.3f m",
+                contact_mask_, (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0,
+                use_short ? "SHORT (rails re-square)" : "LONG (re-approach)",
+                seat_retries_, static_cast<int>(max_seat_retries_), back);
+              issue_segment(c, c, use_short ? "BACK-OFF short" : "BACK-OFF long", backoff_rpm_);
+              return;
+            }
             RCLCPP_WARN(get_logger(),
-              "partial seat (contact=%u, left=%d right=%d) after %d nudges — accepting honestly.",
-              contact_mask_, (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0, nudges_);
+              "partial seat (contact=%u, left=%d right=%d) after %d back-off retries — accepting honestly.",
+              contact_mask_, (contact_mask_ & 1) ? 1 : 0, (contact_mask_ & 2) ? 1 : 0, seat_retries_);
             set_state(SEATED); return;
           }
           abort_reason_ = "reached the seat with NO prox contact — arrived off-centre";
@@ -523,10 +638,13 @@ private:
   std::string reflector_topic_, confidence_topic_, contact_topic_,
               move_cmd_topic_, move_state_topic_, state_topic_;
   double counts_per_m_, wheel_separation_, counts_per_rad_;
-  double seg_len_m_, seg_rpm_, aim_tol_, aim_sign_, commit_range_, max_segments_;
+  double seg_len_m_, seg_len_close_m_, seg_close_range_, stall_rpm_boost_;
+  double seg_rpm_, aim_tol_, aim_sign_, commit_range_, max_segments_;
   double arc_gain_, min_turn_radius_, pivot_fallback_, look_min_, look_frac_;
   double seated_range_m_, seat_settle_s_, commit_rpm_, commit_overdrive_m_;
   double nudge_deg_, nudge_push_m_, nudge_rpm_, max_nudges_;
+  double max_seat_retries_, backoff_target_m_, backoff_rpm_;
+  double short_backoff_m_, short_backoff_tries_;
   double min_confidence_, reflector_stale_s_, acquire_stable_s_, acquire_timeout_s_,
          overall_timeout_s_, seg_ack_timeout_s_, max_stall_retries_,
          max_lateral_m_, max_start_range_m_, control_hz_;
@@ -536,7 +654,7 @@ private:
   bool    refl_valid_{false}, seg_saw_running_{false}, committed_{false};
   double  refl_along_{0}, refl_lateral_{0}, refl_range_{0}, refl_nyaw_{0}, confidence_{0};
   uint8_t contact_mask_{0}, move_state_{MV_IDLE};
-  int     segments_{0}, stall_retries_{0}, nudges_{0};
+  int     segments_{0}, stall_retries_{0}, nudges_{0}, seat_retries_{0};
   std::string seg_desc_, abort_reason_;
   rclcpp::Time last_refl_time_{0,0,RCL_ROS_TIME}, acquire_start_{0,0,RCL_ROS_TIME},
                valid_since_{0,0,RCL_ROS_TIME}, start_time_{0,0,RCL_ROS_TIME},
