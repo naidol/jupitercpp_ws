@@ -159,7 +159,12 @@
 #define MOVE_STALL_MIN_COUNTS 3        // progress smaller than this counts as "no progress"
 #define MOVE_MAX_SEGMENT_CNT  6200     // reject any segment longer than this (~1.5 m) — guards
                                        // against a bad computation driving across the room
-#define MOVE_TIMEOUT_FACTOR   3.0f     // abort after expected_time * this (+1 s floor)
+// 3.0 -> 5.0 (2026-08-11). Driving FORWARD out of the dock makes the single rear caster flip
+// 180 deg from its reverse-trailing position -- the slowest move this chassis can make. A 205
+// count back-off got a 2.1 s budget and timed out mid-flip. The stall and divergence guards are
+// the real protection; the timeout only needs to be generous enough not to fire on legitimate
+// slow motion.
+#define MOVE_TIMEOUT_FACTOR   5.0f     // abort after expected_time * this (+1 s floor)
 #define MOVE_DIVERGE_COUNTS   150      // abort if remaining error GROWS this far beyond its start
                                        // value (~3.6 cm). Catches an inverted encoder sign or a
                                        // wheel driven the wrong way: without it the loop reads a

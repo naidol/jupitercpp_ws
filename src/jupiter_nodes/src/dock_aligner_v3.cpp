@@ -133,6 +133,19 @@ public:
     // swivels atan(0.180/R) -- about 5 deg at R=2 m, 13 deg at R=0.8 m. That keeps the robot in
     // the regime that demonstrably works, and folds AIM+DRIVE into one primitive.
     arc_gain_         = declare_parameter("arc_gain",         0.6);   // fraction of the aim error corrected per segment
+    // HEADING TERM (Logan's observation, 2026-08-11). Pure pursuit converges POSITION but leaves
+    // terminal HEADING to fall out of whatever path was taken -- a known property. Measured: a run
+    // reached lateral -0.0007 m (0.7 mm off centre, essentially perfect) yet -2.2 deg of skew. The
+    // rear prox sit +-150 mm from centre, so 2.2 deg puts one ~6 mm out, past an inductive sensor's
+    // range. Being centred is no use if you arrive crooked.
+    //   aim  = bearing to the carrot          -> POSITION error
+    //   nyaw = heading vs the dock normal     -> HEADING error   (was never used for control)
+    // theta = arc_gain * (aim + heading_gain * nyaw) makes this a POSE controller instead of a
+    // pure-pursuit one. heading_gain ramps in as the robot closes: far out get CENTRED, close in
+    // also get SQUARE. Sign convention matches aim -- rotating CCW by nyaw drives nyaw to zero.
+    heading_gain_     = declare_parameter("heading_gain",     0.8);   // weight at/below heading_full_range
+    heading_full_range_ = declare_parameter("heading_full_range", 0.45);  // m: full weight at/below this
+    heading_zero_range_ = declare_parameter("heading_zero_range", 0.90);  // m: no weight at/above this
     min_turn_radius_  = declare_parameter("min_turn_radius",  0.80);  // m — caps curvature -> caps caster swivel
     pivot_fallback_   = declare_parameter("pivot_fallback_deg", 25.0) * M_PI / 180.0;
     // CARROT LOOKAHEAD. look = max(look_min, look_frac * axis_distance). The floor matters more
@@ -207,7 +220,9 @@ public:
     //       Only worth it if the short retry fails, and it is useless if the residual skew turns
     //       out to be SYSTEMATIC (the same approach would just reproduce it).
     short_backoff_m_    = declare_parameter("short_backoff_m",    0.05);
-    short_backoff_tries_= declare_parameter("short_backoff_tries", 2);
+    // 2 -> 0: DISPROVEN 2026-08-11. Two consecutive short back-off + re-push cycles produced
+    // IDENTICAL contact=2 both times -- the rails do not re-square the robot on re-entry.
+    short_backoff_tries_= declare_parameter("short_backoff_tries", 0);
     max_seat_retries_ = declare_parameter("max_seat_retries", 3);     // total, short + long
     backoff_target_m_ = declare_parameter("backoff_target_m", 0.38);  // LONG back-off target range
     backoff_rpm_      = declare_parameter("backoff_rpm",      25);
@@ -466,7 +481,15 @@ private:
         // sampling interval (see the seg_len note above).
         const double cap = (d <= seg_close_range_) ? seg_len_close_m_ : seg_len_m_;
         const double s_travel = std::min(cap, d - commit_range_ + 0.05);
-        double theta = aim_sign_ * arc_gain_ * aim;
+        // Blend the heading term in as we close: 0 above heading_zero_range, full at/below
+        // heading_full_range, linear between. Far out, chasing heading would fight the approach;
+        // close in, it is the difference between contact=3 and a partial seat.
+        double hw = 0.0;
+        if (d <= heading_full_range_)      hw = 1.0;
+        else if (d < heading_zero_range_)  hw = (heading_zero_range_ - d) /
+                                                (heading_zero_range_ - heading_full_range_);
+        const double heading_err = hw * heading_gain_ * refl_nyaw_;
+        double theta = aim_sign_ * arc_gain_ * (aim + heading_err);
         const double theta_max = s_travel / min_turn_radius_;
         theta = clampd(theta, -theta_max, theta_max);
 
@@ -476,11 +499,11 @@ private:
         const double  radius = (std::fabs(theta) > 1e-6) ? (s_travel / std::fabs(theta)) : 999.0;
         RCLCPP_INFO(get_logger(),
           "ARC %.3f m turning %+.1f deg (R=%.2fm, caster swivel ~%.0f deg) @%drpm%s "
-          "[d=%.3f offset=%+.3f aim=%+.1f]",
+          "[d=%.3f offset=%+.3f aim=%+.1f nyaw=%+.1f hw=%.2f]",
           s_travel, theta * 180.0 / M_PI, radius,
           std::atan(0.180 / std::max(0.2, radius)) * 180.0 / M_PI,
           static_cast<int>(eff_rpm), stall_retries_ ? " [BOOSTED]" : "",
-          d, offset, aim * 180.0 / M_PI);
+          d, offset, aim * 180.0 / M_PI, refl_nyaw_ * 180.0 / M_PI, hw);
         issue_segment(cl, cr, "ARC", eff_rpm);
         return;
       }
@@ -502,20 +525,34 @@ private:
         }
         if (move_state_ == MV_RUNNING) return;      // still executing
 
+        // BACK-OFF segments are routed on what the segment WAS, not on committed_. A back-off is
+        // "committed" yet moving AWAY from the dock, so the generic "terminal while committed =
+        // arrival" rule is exactly backwards for it -- 2026-08-11 a short back-off timed out and
+        // was declared an arrival while the robot sat 50 mm OUT of the dock, so the re-push never
+        // ran. Timeout/stall on a back-off is fine: it only has to get clear, not hit a target.
+        if (seg_desc_ == "BACK-OFF short" &&
+            (move_state_ == MV_DONE || move_state_ == MV_STALL || move_state_ == MV_TIMEOUT)) {
+          const double push = short_backoff_m_ + commit_overdrive_m_;
+          const int32_t c = static_cast<int32_t>(-push * counts_per_m_);
+          RCLCPP_INFO(get_logger(), "back-off ended (%s) — re-pushing %.3f m so the rails can re-square",
+                      move_state_name(move_state_), push);
+          issue_segment(c, c, "RE-PUSH", commit_rpm_);
+          return;
+        }
+        if (seg_desc_ == "BACK-OFF long" &&
+            (move_state_ == MV_DONE || move_state_ == MV_STALL || move_state_ == MV_TIMEOUT)) {
+          RCLCPP_INFO(get_logger(), "long back-off ended (%s) — re-planning a fresh approach",
+                      move_state_name(move_state_));
+          committed_ = false;
+          set_state(PLAN);
+          return;
+        }
+
         // Terminal state reached.
         switch (move_state_) {
           case MV_DONE:
             RCLCPP_INFO(get_logger(), "seg %d (%s) DONE", segments_, seg_desc_.c_str());
             stall_retries_ = 0;
-            // After a SHORT back-off we are committed but NOT at the dock — drive straight back
-            // in rather than sitting in SEAT_WAIT waiting for a contact that cannot come.
-            if (committed_ && seg_desc_ == "BACK-OFF short") {
-              const double push = short_backoff_m_ + commit_overdrive_m_;
-              const int32_t c = static_cast<int32_t>(-push * counts_per_m_);
-              RCLCPP_INFO(get_logger(), "re-pushing %.3f m after short back-off", push);
-              issue_segment(c, c, "RE-PUSH", commit_rpm_);
-              return;
-            }
             if (committed_) { seat_wait_start_ = t; set_state(SEAT_WAIT); }
             else            { set_state(PLAN); }
             return;
@@ -641,6 +678,7 @@ private:
   double seg_len_m_, seg_len_close_m_, seg_close_range_, stall_rpm_boost_;
   double seg_rpm_, aim_tol_, aim_sign_, commit_range_, max_segments_;
   double arc_gain_, min_turn_radius_, pivot_fallback_, look_min_, look_frac_;
+  double heading_gain_, heading_full_range_, heading_zero_range_;
   double seated_range_m_, seat_settle_s_, commit_rpm_, commit_overdrive_m_;
   double nudge_deg_, nudge_push_m_, nudge_rpm_, max_nudges_;
   double max_seat_retries_, backoff_target_m_, backoff_rpm_;
