@@ -8,12 +8,13 @@ board was fabricated, so the schematic can be redrawn and sent to JLCPCB in one 
 **Source of truth for pin assignments:** `firmware/esp32/include/jupiter_config.h`.
 **Predecessor schematic:** `~/Documents/Jupiter_ESP32_Board_easyeda.pdf`.
 
-> ### ⚠ Resolve these three before drawing anything
-> They are contradictions between the old schematic, the firmware and the docs. Each one is
-> cheap to settle with a multimeter and expensive to get wrong on a fabricated board.
-> They are detailed in §9.
+> ### ⚠ Before drawing anything
+> Contradictions between the old schematic, the firmware and the docs. Cheap to settle with a
+> multimeter, expensive to get wrong on a fabricated board. Detailed in §9.
 >
-> 1. What voltage actually feeds DRV8870 `VM` — a regulated 12 V, or the raw 4S pack?
+> 1. ~~What feeds DRV8870 `VM`?~~ **RESOLVED** — a regulated **12 V** from an external
+>    16.8 V → 12 V buck. That buck moves **onto** the new board (§10). See §9.1 for the firmware
+>    bug this exposes.
 > 2. What are the two real resistor values in the battery divider — 100 k/20 k or 100 k/22 k?
 > 3. Three GPIOs are defined twice in firmware (13, 15, 4). Confirm which function is physically wired.
 
@@ -298,22 +299,35 @@ offset-calibrated via `ALGO_PART_TO_PART_RANGE_OFFSET_MM`. **Never switch profil
 
 ## 9. The three contradictions to resolve first
 
-### 9.1 What feeds DRV8870 `VM`?
+### 9.1 RESOLVED — VM is a regulated 12 V, and `voltageScale()` is compensating for nothing
 
-ver3_1 shows **+12 V**. But the firmware compensates motor duty against *measured pack voltage*:
+**The board is fed 12 V from an external 16.8 V → 12 V buck.** ver3_1's `+12 V` is accurate.
+The motors are **rated 12 V DC**, so this rail is not optional — it is what keeps them in spec.
+
+⚠ **This exposes a firmware bug.** The duty compensation reads the **pack**, not the rail:
 
 ```c
-#define MOTOR_V_NOMINAL   14.4f   // reference pack voltage
-#define MOTOR_V_COMP_MIN  0.80f   // clamp (16.8 V -> 0.857)
-#define MOTOR_V_COMP_MAX  1.25f   // clamp (12.0 V -> 1.200)
+#define MOTOR_V_NOMINAL   14.4f   // <- describes a rail that does not exist
+#define MOTOR_V_COMP_MIN  0.80f   // 16.8 V -> 0.857
+#define MOTOR_V_COMP_MAX  1.25f   // 12.0 V -> 1.200
 ```
 
-Those clamps span **12.0–16.8 V**, which is the 4S pack range, not a regulated 12 V rail. If VM
-were truly a fixed 12 V, that entire compensation would be meaningless — and it is load-bearing
-for docking, which was tuned at 14.4 V.
+`BATTERY_ADC` on GPIO34 measures the 4S pack (confirmed: it read 15.06 V on 2026-08-12, which is a
+pack voltage, not a 12 V rail). `voltageScale()` then scales commanded duty by
+`MOTOR_V_NOMINAL / V_pack` — but the motors sit behind a regulator and **never see the pack**.
 
-**Measure VM at U1 pin, on the bench, at a known pack voltage.** If it tracks the pack, draw the
-new board with **VM = pack**, fused and reverse-protected, and delete the 12 V motor rail.
+Consequence: across a discharge from 16.8 V to 13 V the scale factor moves 0.857 → 1.108, swinging
+commanded duty by roughly **29 % for no physical reason**. Drive behaviour drifts with state of
+charge. This is a plausible contributor to the docking repeatability problem, since every trial
+ran at a different pack voltage.
+
+**Verify first:** measure VM at a DRV8870 VM pin with the pack full, then again near-empty. If VM
+holds ~12 V in both cases, the compensation is spurious.
+
+**Then fix:** set `MOTOR_V_NOMINAL = 12.0` and clamp `voltageScale()` to unity (or delete it).
+The mechanism is only correct for an unregulated, pack-fed VM. Note this will shift the effective
+duty of the `dock_aligner_v3` tune — **revalidate docking after the change**, it is not a
+transparent edit.
 
 ### 9.2 Battery divider resistor values
 
@@ -336,63 +350,137 @@ encoder definitions entirely** so the mapping is unambiguous, and clean up the f
 
 ---
 
-## 10. Power supply — one buck, then keep the linear
+## 10. Power supply — bring the external buck onboard
 
-ver3_1 uses **SSP1117-3.3 V** and **SSP1117-5.0 V** linear regulators, both from the 12 V rail.
-Both are now stressed. Note the ESP32 DevKit does **not** sit on the 3.3 V rail — ver3_1 feeds it
-5 V into VIN and it regulates its own 3.3 V onboard.
+**The change:** the board is currently fed 12 V by an **external 16.8 V → 12 V buck** sitting
+elsewhere on the robot. The new board takes the **raw 4S pack** and generates all three rails
+itself. One input, one fuse, one reverse-protection stage, one less box to mount and wire.
 
-| Rail | Feeds | Est. current | Dissipation, linear from 12 V |
-|---|---|---|---|
-| 5 V | ESP32 DevKit, IR driver, J3 header | ~250–350 mA | **1.8–2.4 W** — already marginal |
-| 3.3 V | BNO055, OLED, mux, 7 × ToF, DRV8870 VREF | ~200–400 mA | **1.7–3.5 W** — will not work |
-
-### Architecture
+### Target architecture
 
 ```
-  PACK/12V ──► BUCK ──► 5 V (2 A) ──┬──► ESP32 DevKit VIN
-                                     ├──► IR emitter driver (§6)
-                                     └──► SSP1117-3.3 ──► 3.3 V ──► IMU, OLED, mux, ToFs
+  PACK 12–16.8 V ──► fuse ──► ideal-diode FET ──► BUCK #1 ──► 12 V (5 A) ──┬──► DRV8870 VM ×2
+                                                                            ├──► prox sensors ×2
+                                                                            └──► BUCK #2 ──► 5 V (2 A)
+                                                                                     │
+                                                                                     ├──► ESP32 DevKit VIN
+                                                                                     ├──► IR emitter driver (§6)
+                                                                                     └──► SSP1117-3.3 ──► 3.3 V
+                                                                                              │
+                                                                                              └──► IMU, OLED, mux, 7 × ToF
 ```
 
-**One switcher, not two.** The 3.3 V rail stays linear, which matters more than usual here: it
-feeds a photon-counting ToF array and sits beside a 12-bit ADC reading pack voltage, and switching
-ripple is the last thing either wants. Dissipation in the retained LDO drops to
-(5 − 3.3) × 0.4 A ≈ **0.7 W** — comfortable in SOT-223. **The existing SSP1117-3.3 is kept**,
-simply re-sourced from 5 V instead of 12 V.
+**Two switchers and one linear.** 5 V is derived from the 12 V rail rather than from the pack, so
+only one stage ever sees pack voltage — fewer high-voltage parts, simpler protection.
 
-### Added components
+The 3.3 V rail stays **linear**, deliberately. It feeds a photon-counting ToF array and sits beside
+the 12-bit pack-voltage ADC; switching ripple is the last thing either wants. Fed from 5 V its
+dissipation is only (5 − 3.3) × 0.4 A ≈ **0.7 W** — comfortable in SOT-223. **The existing
+SSP1117-3.3 is retained**, simply re-sourced from 5 V instead of 12 V.
 
-| Item | Value / part | Notes |
+### Rail loads
+
+| Rail | Feeds | Current |
 |---|---|---|
-| Buck IC | **MP1584EN**, SOIC-8-EP | 3 A, 4.5–28 V in. Cheap, well stocked. 28 V covers 12 V **or** pack-fed (§9.1) |
-| *alternative* | AP63205WU-7, TSOT-23-6 | 2 A, 3.8–32 V, integrated bootstrap, low EMI, fewer externals |
-| *avoid* | TPS563201 | 17 V max — no margin against a 16.8 V pack |
-| Inductor | 10 µH, ≥3 A sat, **shielded** | Unshielded next to a 400 kHz I²C bus is asking for trouble |
-| Input caps | 2 × 10 µF / 50 V X7R (1206) + 100 nF | Rated for pack plus transients |
-| Output caps | 2 × 22 µF / 16 V X7R | |
-| Bootstrap cap | 100 nF / 50 V | |
-| Feedback divider | 52.3 k / 10 k, 1 % | 0.8 V ref → 0.8 × (1 + 52.3/10) = 4.98 V |
-| Enable pull-up | 100 k to VIN | |
-| Freq-set resistor | per datasheet | Depends on chosen switching frequency |
+| **12 V** | 2 × DRV8870 VM, prox sensors, buck #2 | **≤ 3.3 A** motors (see sizing) + ~0.2 A |
+| **5 V** | ESP32 DevKit VIN, IR driver, J3 | ~250–350 mA |
+| **3.3 V** | BNO055, OLED, mux, 7 × ToF, VREF | ~200–400 mA |
 
-⚠ The **inductor value and freq-set resistor above are a starting point, not a verified design.**
-Confirm against the MP1584 datasheet's typical-application table for the actual input range.
-Also check LCSC stock and whether the part is JLC **Basic or Extended** — Extended carries a
-per-feeder setup fee, which is material on a one-off run.
+Note the ESP32 DevKit does **not** sit on the 3.3 V rail — ver3_1 feeds it 5 V into VIN and it
+regulates its own 3.3 V onboard.
+
+### Sizing buck #1 — bounded by the existing ISEN design
+
+The DRV8870s are already current-limited by the 200 mΩ sense resistors and the 3.3 V VREF:
+
+```
+I_TRIP = V_REF / (10 × R_ISEN) = 3.3 V / (10 × 0.2 Ω) = 1.65 A per channel
+```
+
+Two channels → **3.3 A absolute worst case, including stall**. Add ~0.2 A for prox and the 5 V
+stage. A **5 A** part gives comfortable margin. *Confirm the factor of 10 against the DRV8870
+datasheet before relying on it.*
+
+### Dropout behaves correctly here — no boost needed
+
+A 12 V rail from a 12–16.8 V pack sounds marginal, but with **12 V-rated motors** it is exactly right:
+
+| Pack | 12 V rail | Motors |
+|---|---|---|
+| 16.8 V (full) | regulated **12.0 V** | at rating |
+| ~12.5 V | buck approaches full duty | at rating |
+| 12.0 V (flat) | **passes through**, ~12 V | still within rating |
+
+The rail never exceeds 12 V and never needs to exceed its input. Choose a controller supporting
+**high / 100 % duty cycle** so it degrades into pass-through rather than hiccuping.
+
+### Buck #1 requirements (12 V @ 5 A)
+
+| Parameter | Requirement |
+|---|---|
+| V_in | 12–17 V operating, **≥28 V rated** for transient margin |
+| V_out | 12.0 V |
+| I_out | ≥4 A continuous, 5 A preferred |
+| Topology | **Synchronous** — at 71–100 % duty a diode rectifier wastes real power |
+| Duty | **High / 100 % pass-through capable** — the requirement most parts fail |
+
+Candidates: **TPS54560** (5 A, 60 V), **TPS54540** (5 A, 42 V), or an MPS equivalent. Verify LCSC
+stock and JLC Basic/Extended status before committing — Extended parts carry a per-feeder setup
+fee that is material on a one-off run.
+
+**Easiest starting point:** whatever the existing external buck already is. It is proven in this
+exact application. Read the part number off it and replicate the topology.
+
+### Buck #2 requirements (5 V @ 2 A from 12 V)
+
+**MP1584EN** (SOIC-8-EP, 3 A, 4.5–28 V) or **AP63205WU-7** (TSOT-23-6, 2 A, 3.8–32 V).
+Supporting parts: 10 µH shielded inductor ≥3 A sat; 2 × 10 µF/25 V X7R input + 100 nF;
+2 × 22 µF/16 V X7R output; 100 nF bootstrap; feedback divider **52.3 k / 10 k 1 %**
+(0.8 V ref → 4.98 V); 100 k enable pull-up.
+
+⚠ Inductor and frequency-set values are a **starting point, not a verified design** — confirm
+against the datasheet's typical-application table for the actual input range.
+
+### ⚠ Regenerative kickback — design this in
+
+A buck **cannot sink current**. When the motors decelerate or reverse, energy returns up the rail
+and pumps the 12 V node. Previously that energy went back toward the pack through the external
+buck's path; with the regulator onboard and the motors behind it, it has nowhere to go.
+
+Add on the 12 V rail, near the drivers:
+- **Bulk electrolytic, 220–470 µF / 25 V**
+- **TVS or zener clamp at ~15 V**
+
+DRV8870 brake mode shorts the winding and dissipates most of it in the motor, so this is insurance
+rather than the primary path — but it is cheap insurance on the rail the whole board hangs off.
+
+### Thermal
+
+At 3.3 A the 12 V rail delivers ~40 W. Even at 93 % efficiency that is ~3 W in the buck stage.
+Give the IC and inductor **copper pour and a thermal via array**; do not tuck them under the
+DevKit where there is no airflow.
 
 ### Switcher layout
 
-- Keep the **switch node** (IC → inductor) as small as physically possible — it is the main radiator.
+- Keep each **switch node** (IC → inductor) as small as physically possible — it is the main radiator.
 - Input cap **directly** across the IC's VIN/GND, shortest possible loop.
-- Route the **feedback trace away from the inductor**; reference it to output-cap ground.
-- **Physically separate the switcher from the I²C fan-out, ToF connectors and the battery ADC node.**
-  Put it at the power-input end, sensors at the far end.
+- Route **feedback traces away from the inductors**; reference to output-cap ground.
+- **Physically separate both switchers from the I²C fan-out, ToF connectors and the battery ADC
+  node.** Power at the input end, sensors at the far end.
+
+### Input stage
+
+- Retain the **S1206-FA-8.0A** fuse and DBT50-8.25-2P terminal — confirm both are rated for pack
+  current at the new input (they were sized for a 12 V input, now carrying similar current).
+- Add **reverse-polarity protection**: P-FET ideal diode, *not* a series Schottky — the drop is
+  wasted heat at motor currents.
+- Retain the rail indicator LEDs (+12 V, +5 V, +3.3 V). Genuinely useful at the bench.
 
 ### Lower-risk alternative
 
-Footprint a **ready-made MP1584 buck module** on a 4-pin header instead. Zero layout risk,
-hand-fitted after assembly, not JLC-assemblable. For a one-off build that is a rational trade.
+Footprint **ready-made buck modules** on 4-pin headers instead of discrete switchers. Zero layout
+risk, hand-fitted after assembly, not JLC-assemblable. For a one-off build that is a rational
+trade — and for buck #1 it is effectively what the robot already runs.
 
 Retain from ver3_1:
 - Input fuse **S1206-FA-8.0A** and the DBT50-8.25-2P terminal
@@ -438,9 +526,12 @@ Add:
 | 3-pin connectors (prox) | 2 | 12 V, keyed |
 | BAT54S clamp diodes | 3 | 2 × prox, 1 × battery ADC |
 | 2N7002 / BSS138 | 1 | IR emitter driver |
-| Buck regulator (MP1584EN or AP63205) | 1 | new 5 V rail; SSP1117-3.3 is RETAINED, re-sourced from 5 V |
-| Inductor 10 µH, ≥3 A, shielded | 1 | buck |
-| Buck passives (caps, FB divider, BST) | ~8 | see §10 |
+| Buck #1 IC, 12 V @ 5 A sync (TPS54540/54560 class) | 1 | **replaces the external 16.8→12 V buck** |
+| Buck #2 IC, 5 V @ 2 A (MP1584EN / AP63205) | 1 | fed from 12 V; SSP1117-3.3 is RETAINED, re-sourced from 5 V |
+| Inductors, shielded | 2 | one per buck; #1 sat rating ≥ 1.5× peak motor current |
+| Buck passives (caps, FB dividers, BST) | ~16 | see §10 |
+| Bulk electrolytic 220–470 µF / 25 V | 1 | 12 V rail, motor regen |
+| TVS / zener clamp ~15 V | 1 | 12 V rail, motor regen |
 | Resistors: 10 k pull-down/up (strapping) | ~8 | §7 |
 | Resistors: 2.2 k (upstream I²C pull-up) | 2 | |
 | Resistors: 4.7 k (per-channel I²C pull-up) | 16 | 2 per active mux channel |
