@@ -336,17 +336,63 @@ encoder definitions entirely** so the mapping is unambiguous, and clean up the f
 
 ---
 
-## 10. Power supply — reconsider the linears
+## 10. Power supply — one buck, then keep the linear
 
-ver3_1 uses **SSP1117-3.3 V** and **SSP1117-5.0 V** linear regulators from the 12 V rail.
+ver3_1 uses **SSP1117-3.3 V** and **SSP1117-5.0 V** linear regulators, both from the 12 V rail.
+Both are now stressed. Note the ESP32 DevKit does **not** sit on the 3.3 V rail — ver3_1 feeds it
+5 V into VIN and it regulates its own 3.3 V onboard.
 
-At 12 V in, 3.3 V out, they dissipate **8.7 V × I**. The new board's 3.3 V load is materially
-higher than ver3_1's — 7 ToFs (~140 mA) + mux + IMU + OLED + ESP32 could reach 400–500 mA, which
-is **4.4 W of heat** in an SOT-223 package. That will not work.
+| Rail | Feeds | Est. current | Dissipation, linear from 12 V |
+|---|---|---|---|
+| 5 V | ESP32 DevKit, IR driver, J3 header | ~250–350 mA | **1.8–2.4 W** — already marginal |
+| 3.3 V | BNO055, OLED, mux, 7 × ToF, DRV8870 VREF | ~200–400 mA | **1.7–3.5 W** — will not work |
 
-**Replace the 3.3 V linear with a buck** (MP1584, TPS5430, or an LCSC-stocked equivalent JLC can
-assemble). Keep a small linear downstream of it only if ADC or IMU noise proves to be a problem —
-measure before assuming.
+### Architecture
+
+```
+  PACK/12V ──► BUCK ──► 5 V (2 A) ──┬──► ESP32 DevKit VIN
+                                     ├──► IR emitter driver (§6)
+                                     └──► SSP1117-3.3 ──► 3.3 V ──► IMU, OLED, mux, ToFs
+```
+
+**One switcher, not two.** The 3.3 V rail stays linear, which matters more than usual here: it
+feeds a photon-counting ToF array and sits beside a 12-bit ADC reading pack voltage, and switching
+ripple is the last thing either wants. Dissipation in the retained LDO drops to
+(5 − 3.3) × 0.4 A ≈ **0.7 W** — comfortable in SOT-223. **The existing SSP1117-3.3 is kept**,
+simply re-sourced from 5 V instead of 12 V.
+
+### Added components
+
+| Item | Value / part | Notes |
+|---|---|---|
+| Buck IC | **MP1584EN**, SOIC-8-EP | 3 A, 4.5–28 V in. Cheap, well stocked. 28 V covers 12 V **or** pack-fed (§9.1) |
+| *alternative* | AP63205WU-7, TSOT-23-6 | 2 A, 3.8–32 V, integrated bootstrap, low EMI, fewer externals |
+| *avoid* | TPS563201 | 17 V max — no margin against a 16.8 V pack |
+| Inductor | 10 µH, ≥3 A sat, **shielded** | Unshielded next to a 400 kHz I²C bus is asking for trouble |
+| Input caps | 2 × 10 µF / 50 V X7R (1206) + 100 nF | Rated for pack plus transients |
+| Output caps | 2 × 22 µF / 16 V X7R | |
+| Bootstrap cap | 100 nF / 50 V | |
+| Feedback divider | 52.3 k / 10 k, 1 % | 0.8 V ref → 0.8 × (1 + 52.3/10) = 4.98 V |
+| Enable pull-up | 100 k to VIN | |
+| Freq-set resistor | per datasheet | Depends on chosen switching frequency |
+
+⚠ The **inductor value and freq-set resistor above are a starting point, not a verified design.**
+Confirm against the MP1584 datasheet's typical-application table for the actual input range.
+Also check LCSC stock and whether the part is JLC **Basic or Extended** — Extended carries a
+per-feeder setup fee, which is material on a one-off run.
+
+### Switcher layout
+
+- Keep the **switch node** (IC → inductor) as small as physically possible — it is the main radiator.
+- Input cap **directly** across the IC's VIN/GND, shortest possible loop.
+- Route the **feedback trace away from the inductor**; reference it to output-cap ground.
+- **Physically separate the switcher from the I²C fan-out, ToF connectors and the battery ADC node.**
+  Put it at the power-input end, sensors at the far end.
+
+### Lower-risk alternative
+
+Footprint a **ready-made MP1584 buck module** on a 4-pin header instead. Zero layout risk,
+hand-fitted after assembly, not JLC-assemblable. For a one-off build that is a rational trade.
 
 Retain from ver3_1:
 - Input fuse **S1206-FA-8.0A** and the DBT50-8.25-2P terminal
@@ -392,7 +438,9 @@ Add:
 | 3-pin connectors (prox) | 2 | 12 V, keyed |
 | BAT54S clamp diodes | 3 | 2 × prox, 1 × battery ADC |
 | 2N7002 / BSS138 | 1 | IR emitter driver |
-| Buck regulator, 3.3 V | 1 | replaces SSP1117-3.3 |
+| Buck regulator (MP1584EN or AP63205) | 1 | new 5 V rail; SSP1117-3.3 is RETAINED, re-sourced from 5 V |
+| Inductor 10 µH, ≥3 A, shielded | 1 | buck |
+| Buck passives (caps, FB divider, BST) | ~8 | see §10 |
 | Resistors: 10 k pull-down/up (strapping) | ~8 | §7 |
 | Resistors: 2.2 k (upstream I²C pull-up) | 2 | |
 | Resistors: 4.7 k (per-channel I²C pull-up) | 16 | 2 per active mux channel |
