@@ -54,6 +54,37 @@
 #define IR_PACKET_GAP_MS   40
 #define BATTERY_FULL_STOP  16.70f     // stop requesting charge above this (4S full = 16.8V)
 
+// ---- FRONT TIME-OF-FLIGHT RANGEFINDER (VL53L0X, 0x29, shares the BNO055/OLED I2C bus) ----
+// Publishes sensor_msgs/Range on /tof/front. The low near-field obstacle layer the LiDAR
+// cannot see (it scans well above floor level).
+//
+// ⚠ MOUNTING IS THE WHOLE BALLGAME. In a light-grey printed casing this sensor returned ~4%
+// valid readings with values uncorrelated to reality — the bore reflected its own VCSEL back
+// into the receiver a few mm away, a CONSTANT ~14 MCPS that buried the real return. Free of
+// the casing, the identical sensor gave 175/175 valid. Black matte print, aperture >= 6-7mm,
+// module flush or proud — NEVER recessed. Full detail: firmware/i2c_scan/src/main.cpp.
+#define TOF_ENABLED             1
+#define TOF_I2C_ADDR            0x29
+#define TOF_PUBLISH_MS          100        // 10 Hz — the reflex layer does not need 50
+#define TOF_INIT_TIMEOUT_MS     500
+#define TOF_TIMING_BUDGET_US    33000      // DEFAULT profile. Do NOT switch profile at runtime:
+#define TOF_SIGNAL_RATE_LIMIT   0.25f      // measured, the two profiles disagreed by 152mm.
+#define TOF_NO_TARGET_MM        8190       // sensor's own "nothing detected" code
+#define TOF_MIN_RANGE_M         0.03f
+#define TOF_MAX_RANGE_M         1.20f      // practical ceiling: signal was 0.86 MCPS at 1.0m,
+                                           // already near the 0.25 MCPS floor for this profile
+#define TOF_FOV_RAD             0.436f     // 25 deg full cone (+/-12.5)
+#define TOF_FRAME_ID            "tof_front_link"
+
+// Linear calibration, measured 2026-08-13 against a laser distance meter, DEFAULT profile:
+//   true 307 -> 336.0 | 619 -> 659.7 | 998 -> 1051.5   (100% valid at every point)
+//   least-squares: measured = 1.0354 * true + 18.4 mm, residuals -0.3 / +0.4 / -0.2 mm
+// The fit is near-perfect, so correcting is free accuracy — the topic reports TRUE metres.
+// Obstacle detection would not need it; true ranging does. Set 0 to publish raw.
+#define TOF_APPLY_CALIBRATION   1
+#define TOF_CAL_SCALE           1.0354f
+#define TOF_CAL_OFFSET_MM       18.4f
+
 // cmd_vel WATCHDOG: no cmd_vel for this long -> motors stop (brake). Without it the last
 // command LATCHES FOREVER if every publisher dies (proven: runaway spin into the doorway).
 #define CMD_VEL_TIMEOUT_MS 400

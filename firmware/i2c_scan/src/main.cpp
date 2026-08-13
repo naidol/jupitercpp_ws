@@ -176,18 +176,13 @@ void setup() {
 }
 
 void loop() {
-  static bool long_range = false;
-  static uint32_t last_switch = 0;
-
   // Re-attempt bring-up rather than printing timeouts forever: this way the banner explaining
   // WHY it is not ranging reappears every second, whenever the bench operator attaches.
   if (!tof_ready) { delay(1000); tof_ready = bring_up(); if (tof_ready) apply_profile(false); return; }
 
-  if (millis() - last_switch > 10000) {
-    last_switch = millis();
-    long_range = !long_range;
-    apply_profile(long_range);
-  }
+  // PROFILE IS LOCKED to DEFAULT. The earlier 10 s alternation was a diagnostic and it must not
+  // run during characterisation: the two profiles disagreed by 152 mm on the same target, so
+  // switching mid-capture corrupts every statistic taken across the boundary.
 
   const uint16_t mm = tof.readRangeContinuousMillimeters();
   const bool to = tof.timeoutOccurred();

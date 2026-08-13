@@ -29,6 +29,8 @@
 #include <nav_msgs/msg/odometry.h>
 #include <std_msgs/msg/empty.h>
 #include <std_msgs/msg/u_int8.h>
+#include <sensor_msgs/msg/range.h>
+#include <VL53L0X.h>
 
 #include "jupiter_config.h"
 #include "imu_bno055.h"
@@ -90,6 +92,17 @@ sensor_msgs__msg__BatteryState battery_msg;
 // Both bits set = seated square against the dock.
 rcl_publisher_t dock_contact_publisher;
 std_msgs__msg__UInt8 dock_contact_msg;
+
+// ---- Front ToF rangefinder (VL53L0X, shares the BNO055/OLED bus) ----
+// tof_present is latched ONCE at boot. If the sensor is absent or refuses to configure the
+// firmware must carry on driving the robot exactly as before — a missing rangefinder is not
+// allowed to cost motor control, odometry or prox.
+#if TOF_ENABLED
+VL53L0X tof_front;
+bool tof_present = false;
+rcl_publisher_t tof_publisher;
+sensor_msgs__msg__Range tof_msg;
+#endif
 
 // ---- Dock charge-enable emitter (TSAL6400, 38kHz LEDC burst packets) ----
 // The envelope runs in a FreeRTOS task pinned to core 0 (loop()/micro-ROS own core 1),
@@ -651,6 +664,76 @@ void wheelMoveCallback(const void * msgin)
     move_active = true;
 }
 
+#if TOF_ENABLED
+// ---- Front ToF rangefinder ----
+
+// Static Range fields never change; set once so the hot path only touches stamp and range.
+static const char kTofFrameId[] = TOF_FRAME_ID;
+
+static void setup_tof()
+{
+    tof_front.setTimeout(TOF_INIT_TIMEOUT_MS);
+    if (!tof_front.init()) {
+        tof_present = false;          // absent or unconfigurable — carry on without it
+        return;
+    }
+    tof_front.setSignalRateLimit(TOF_SIGNAL_RATE_LIMIT);
+    tof_front.setMeasurementTimingBudget(TOF_TIMING_BUDGET_US);
+    tof_front.startContinuous();
+    tof_present = true;
+
+    tof_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
+    tof_msg.field_of_view  = TOF_FOV_RAD;
+    tof_msg.min_range      = TOF_MIN_RANGE_M;
+    tof_msg.max_range      = TOF_MAX_RANGE_M;
+    tof_msg.header.frame_id.data     = (char *)kTofFrameId;
+    tof_msg.header.frame_id.size     = sizeof(kTofFrameId) - 1;
+    tof_msg.header.frame_id.capacity = sizeof(kTofFrameId);
+}
+
+// Poll RESULT_INTERRUPT_STATUS directly. The driver's readRangeContinuousMillimeters() BLOCKS
+// until a measurement is ready (up to its 500ms timeout), which would stall the 20ms control
+// loop and with it the motor PID and the prox reflex. Checking readiness first means the read
+// only ever happens when it returns immediately.
+static bool tofDataReady()
+{
+    Wire.beginTransmission(TOF_I2C_ADDR);
+    Wire.write(0x13);                                   // RESULT_INTERRUPT_STATUS
+    if (Wire.endTransmission() != 0) return false;
+    if (Wire.requestFrom((uint8_t)TOF_I2C_ADDR, (uint8_t)1) != 1) return false;
+    return (Wire.read() & 0x07) != 0;
+}
+
+static void publish_tof()
+{
+    if (!tofDataReady()) return;
+
+    const uint16_t raw_mm = tof_front.readRangeContinuousMillimeters();
+    if (tof_front.timeoutOccurred()) return;
+
+    float range_m;
+    if (raw_mm >= TOF_NO_TARGET_MM) {
+        // REP-117: nothing detected within range reports +Inf. Publishing max_range instead
+        // would read to a naive consumer as a solid obstacle sitting at exactly max_range.
+        range_m = INFINITY;
+    } else {
+#if TOF_APPLY_CALIBRATION
+        range_m = (((float)raw_mm - TOF_CAL_OFFSET_MM) / TOF_CAL_SCALE) / 1000.0f;
+#else
+        range_m = (float)raw_mm / 1000.0f;
+#endif
+        if (range_m < TOF_MIN_RANGE_M) range_m = TOF_MIN_RANGE_M;
+        if (range_m > TOF_MAX_RANGE_M) range_m = INFINITY;
+    }
+
+    struct timespec ts = getTime();
+    tof_msg.header.stamp.sec     = ts.tv_sec;
+    tof_msg.header.stamp.nanosec = ts.tv_nsec;
+    tof_msg.range                = range_m;
+    RCSOFTCHECK(rcl_publish(&tof_publisher, &tof_msg, NULL));
+}
+#endif  // TOF_ENABLED
+
 void timerCallback(rcl_timer_t *timer, int64_t last_call_time)
 {
     RCLC_UNUSED(last_call_time);
@@ -696,6 +779,11 @@ void timerCallback(rcl_timer_t *timer, int64_t last_call_time)
 
     // Battery at 1 Hz
     EXECUTE_EVERY_N_MS(1000, publish_battery(););
+
+    // Front ToF at 10 Hz. Skipped entirely when the sensor did not come up at boot.
+#if TOF_ENABLED
+    if (tof_present) { EXECUTE_EVERY_N_MS(TOF_PUBLISH_MS, publish_tof();); }
+#endif
 
     // Dock contact state: bit0 = left prox, bit1 = right prox (3 = seated square).
     dock_contact_msg.data = (prox_left_contact ? 1 : 0) | (prox_right_contact ? 2 : 0);
@@ -749,6 +837,17 @@ bool create_entities()
         &dock_contact_publisher, &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt8),
         "/dock/contact"));
+
+    // Front ToF — only advertised when the sensor actually came up, so a missing rangefinder
+    // shows as an absent topic rather than one that silently never publishes.
+#if TOF_ENABLED
+    if (tof_present) {
+        CREATE_CHECK(rclc_publisher_init_default(
+            &tof_publisher, &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
+            "/tof/front"));
+    }
+#endif
 
     CREATE_CHECK(rclc_subscription_init_default(
         &cmd_vel_subscriber, &node,
@@ -808,6 +907,9 @@ void destroy_entities()
     (void)rcl_publisher_fini(&speed_publisher,   &node);
     (void)rcl_publisher_fini(&battery_publisher, &node);
     (void)rcl_publisher_fini(&dock_contact_publisher, &node);
+#if TOF_ENABLED
+    if (tof_present) (void)rcl_publisher_fini(&tof_publisher, &node);
+#endif
     (void)rcl_publisher_fini(&wheel_move_state_publisher,     &node);
     (void)rcl_publisher_fini(&wheel_move_remaining_publisher, &node);
     (void)rcl_subscription_fini(&cmd_vel_subscriber,  &node);
@@ -846,6 +948,9 @@ void setup()
     setup_oled_display();
     setup_imu(&imu_msg);
     setup_battery_adc();
+#if TOF_ENABLED
+    setup_tof();   // non-fatal: leaves tof_present false if the sensor is absent
+#endif
 
     pinMode(ESP32_LED, OUTPUT);
     digitalWrite(ESP32_LED, LOW);
