@@ -105,6 +105,23 @@ def generate_launch_description():
             arguments=['0', '0', '0.05', '0', '0', '0', 'base_footprint', 'imu_link'],
         ),
 
+        # Static TF base_footprint -> tof_front_link (VL53L0X; firmware publishes
+        # sensor_msgs/Range on /tof/front at ~7 Hz). Measured 2026-08-13: 165 mm forward,
+        # on centreline, 85 mm above the floor.
+        # PITCH IS NEGATIVE FOR UP — the mount tilts 8 deg nose-up (-0.1396 rad) to keep the
+        # 25 deg cone off the floor. Same sign convention as the camera's -0.0995 above.
+        # ⚠ The upward tilt has NEVER been verified against a real floor: every attempt was
+        # defeated by the printed casing reflecting the sensor's own laser back into the
+        # receiver (see firmware/i2c_scan/src/main.cpp). Confirm before trusting it for
+        # floor clearance — a tilt that is too shallow reads the floor as an obstacle.
+        Node(
+            package='tf2_ros', executable='static_transform_publisher',
+            name='base_to_tof_front',
+            arguments=['--x', '0.165', '--y', '0.000', '--z', '0.085',
+                       '--roll', '0', '--pitch', '-0.1396', '--yaw', '0',
+                       '--frame-id', 'base_footprint', '--child-frame-id', 'tof_front_link'],
+        ),
+
         # ── Orbbec 336 camera (COLOR ONLY — nvblox retired 2026-06-20) ─────────
         # Depth/point-cloud/laser OFF: the LD20 low lidar now owns low-obstacle sensing, so the camera
         # is freed for face-rec + AprilTag docking (color stream, consumed by the full-stack vision
