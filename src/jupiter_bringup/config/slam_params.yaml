@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # SLAM Toolbox configuration for Jupiter
-# Run slam.launch.py, drive the robot to build the map, then save with:
+# Run slam_mapping_s2e.launch.py, drive the robot to build the map, then save with:
 #   ros2 run nav2_map_server map_saver_cli -f ~/maps/map
 
 slam_toolbox:
