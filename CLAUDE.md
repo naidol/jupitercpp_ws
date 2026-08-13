@@ -68,7 +68,14 @@
 - Localization: EKF (robot_localization) + BNO055 IMU via micro-ROS, yaw covariance ~0.016 rad²
 - SLAM: slam_toolbox async mapping, lifecycle_manager auto-activates on launch
 - Nav2: MPPI controller (Omni motion model for mecanum), full Nav2 stack configured
-- Master launch: ros2 launch jupiter_bringup jupiter_bringup.launch.py (mode:=slam or mode:=nav)
+- Master launch: ros2 launch jupiter_bringup jupiter_bringup_full.launch.py
+  - This is the ONE full-stack launch. Do not fork a second one — jupiter_bringup.launch.py and
+    jupiter_full_s2e.launch.py were deleted 2026-08-13 after drifting onto a retired stack.
+  - Nav comes from navigation_s2e.launch.py, which also starts the camera, the micro-ROS agent
+    and every static TF. enable_nav:=false makes bringup_full supply camera+agent instead.
+  - Mapping is separate: ros2 launch jupiter_bringup slam_mapping_s2e.launch.py
+- Front ToF: VL53L0X on the ESP32 I2C bus, published as sensor_msgs/Range on /tof/front (~7Hz),
+  frame tof_front_link. Verified 2.6mm accurate at 1m. NOT yet wired into any costmap layer.
 - ESP32 auto-reconnect: 4-state micro-ROS state machine (WAITING→AVAILABLE→CONNECTED→DISCONNECTED), no physical reset needed
 - ESP32 battery monitoring: publishes sensor_msgs/BatteryState on /battery/state at 1Hz (R1=100kΩ/R2=22kΩ divider on GPIO34 fitted and working — reads true pack voltage)
 
