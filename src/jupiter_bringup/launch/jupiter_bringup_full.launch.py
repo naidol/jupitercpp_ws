@@ -19,9 +19,10 @@
 # 180 deg out for the LD20 removed on 2026-08-03) and enable_nav defaulted to false to
 # avoid it. Nav is now ON by default.
 #
-# NOTE jupiter_full_s2e.launch.py covers nearly the same ground and additionally starts
-# dock_approach. Decide which is canonical rather than letting them drift apart again —
-# that drift is exactly what left this file pointing at a retired stack for ten days.
+# THIS IS THE ONE CANONICAL FULL-ROBOT LAUNCH. jupiter_full_s2e.launch.py was retired into
+# it on 2026-08-13 (its dock_approach node came across; everything else here was newer).
+# Do not fork a second full-stack launch — two of them drifting apart is exactly what left
+# this file pointing at a retired nav stack for ten days without anyone noticing.
 #
 # Usage:
 #   ros2 launch jupiter_bringup jupiter_bringup_full.launch.py
