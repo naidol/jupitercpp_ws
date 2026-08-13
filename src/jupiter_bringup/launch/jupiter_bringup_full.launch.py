@@ -2,28 +2,37 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Full Jupiter bringup — single command starts everything.
-# Includes camera.launch.py so no separate terminal is needed.
 #
-# Camera (color + IR stereo + IMU) is started first and left running
-# persistently. All other subsystems start after camera is warm.
-#
-# Startup sequence:
-#   t=0s  camera.launch.py  (color + left/right IR + IMU — all streams)
+# Startup sequence (enable_nav:=true, the default):
 #   t=0s  Display + screensaver disabled
-#   t=0s  micro-ROS agent
-#   t=3s  Navigation stack (EKF + LiDAR + Nav2 + cuVSLAM)
+#   t=3s  navigation_s2e.launch.py — S2E lidar + AMCL + EKF + Nav2, AND the micro-ROS
+#         agent, the Orbbec camera and every static TF (incl. tof_front_link)
 #   t=4s  Voice/Whisper (camera warm by now, no DMA conflict)
 #   t=5s  Face recognition + Vision + Brain
 #
+# With enable_nav:=false this file supplies the camera and the micro-ROS agent itself at
+# t=0 instead. Exactly one of the two paths provides them — never both. Starting two
+# Orbbec nodes on one serial number, or two agents on /dev/jupiter_esp32, breaks both.
+#
+# REPOINTED 2026-08-13 from navigation.launch.py to navigation_s2e.launch.py. The former
+# is the retired stack (cuVSLAM, old c82_map_real map, base_laser TF 390 mm low and yaw
+# 180 deg out for the LD20 removed on 2026-08-03) and enable_nav defaulted to false to
+# avoid it. Nav is now ON by default.
+#
+# NOTE jupiter_full_s2e.launch.py covers nearly the same ground and additionally starts
+# dock_approach. Decide which is canonical rather than letting them drift apart again —
+# that drift is exactly what left this file pointing at a retired stack for ten days.
+#
 # Usage:
 #   ros2 launch jupiter_bringup jupiter_bringup_full.launch.py
+#   ros2 launch jupiter_bringup jupiter_bringup_full.launch.py enable_nav:=false
 #   ros2 launch jupiter_bringup jupiter_bringup_full.launch.py enable_microros:=false
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -43,20 +52,25 @@ def generate_launch_description():
 
         DeclareLaunchArgument(
             'enable_nav',
-            default_value='false',
-            description='Start the navigation stack. OFF by default: navigation.launch.py '
-                        'is the old LD20+cuVSLAM stack (both dropped in the lean rebuild). '
-                        'Rework to S2E before enabling.',
+            default_value='true',
+            description='Start the navigation stack (navigation_s2e.launch.py: S2E lidar + '
+                        'AMCL + EKF + Nav2). ON by default since 2026-08-13, when this file '
+                        'was repointed off the retired LD20+cuVSLAM navigation.launch.py.',
         ),
 
         # ── Camera ────────────────────────────────────────────────────────────
         # Started first and never killed — keeps Orbbec firmware warm.
-        # All streams: color (face recog) + IR stereo (cuVSLAM) + IMU (EKF).
+        #
+        # ⚠ navigation_s2e.launch.py STARTS THE CAMERA ITSELF (color-only MJPG 640x480@15).
+        # Two Orbbec nodes on the same serial number fight over the USB device and neither
+        # comes up reliably, so this include runs ONLY when nav is off and nothing else
+        # is providing it.
         TimerAction(period=0.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     os.path.join(bringup_dir, 'launch', 'camera.launch.py')
                 ),
+                condition=UnlessCondition(LaunchConfiguration('enable_nav')),
             ),
         ]),
 
@@ -83,6 +97,10 @@ def generate_launch_description():
 
         # ── micro-ROS agent ───────────────────────────────────────────────────
         # Bus 001 (ESP32) — independent of camera Bus 002.
+        #
+        # ⚠ navigation_s2e.launch.py STARTS THE AGENT ITSELF. Two agents on
+        # /dev/jupiter_esp32 both open the port and corrupt each other's session, so this
+        # runs only when nav is off. Condition = enable_microros AND NOT enable_nav.
         TimerAction(period=0.0, actions=[
             ExecuteProcess(
                 # micro_ros_agent lives in ~/microros_ws (separate overlay) — must be
@@ -93,19 +111,33 @@ def generate_launch_description():
                      'serial --dev /dev/jupiter_esp32 -b 460800'],
                 output='screen',
                 name='micro_ros_agent',
-                condition=IfCondition(enable_microros),
+                condition=IfCondition(PythonExpression([
+                    "'", enable_microros, "' == 'true' and '",
+                    LaunchConfiguration('enable_nav'), "' == 'false'"
+                ])),
             ),
         ]),
 
         # ── Navigation stack ──────────────────────────────────────────────────
-        # EKF + LD20 LiDAR + static TFs + cuVSLAM + Nav2 MPPI.
+        # navigation_s2e.launch.py — S2E lidar + AMCL + EKF + Nav2, and it also brings up
+        # the micro-ROS agent, the Orbbec camera and every static TF (including
+        # base_footprint -> tof_front_link for the front VL53L0X).
+        #
+        # REPOINTED 2026-08-13 from navigation.launch.py, which is the retired stack:
+        # cuVSLAM instead of AMCL, the old c82_map_real map, and a base_laser transform
+        # 390 mm too low with the yaw 180 deg out — describing the LD20 that was physically
+        # removed on 2026-08-03. Launching it put every scan in the wrong place.
+        #
         # Started at t=3s — camera firmware warm by then, no DMA conflict.
-        # Lifecycle manager fires 5s later (built-in delay in navigation.launch.py).
+        # color 1280x720 is REQUIRED here, not cosmetic: navigation_s2e defaults to 640x480 for
+        # standalone nav, but jupiter_vision's AprilTag detector is parameterised for 1280x720
+        # and its pose solution is wrong at any other resolution.
         TimerAction(period=3.0, actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
-                    os.path.join(bringup_dir, 'launch', 'navigation.launch.py')
+                    os.path.join(bringup_dir, 'launch', 'navigation_s2e.launch.py')
                 ),
+                launch_arguments={'color_width': '1280', 'color_height': '720'}.items(),
                 condition=IfCondition(LaunchConfiguration('enable_nav')),
             ),
         ]),
@@ -158,6 +190,22 @@ def generate_launch_description():
                 executable='jupiter_vision',
                 name='jupiter_vision',
                 output='screen',
+            ),
+        ]),
+
+        # ── Docking controller ────────────────────────────────────────────────
+        # Engaged by the brain via /dock/engage ("go to the dock"). Drives the FINAL
+        # approach only — Jupiter must already be near the dock with the tag in view.
+        # Carried over from jupiter_full_s2e.launch.py when that file was retired.
+        TimerAction(period=5.0, actions=[
+            Node(
+                package='jupiter_nodes',
+                executable='dock_approach',
+                name='dock_approach',
+                output='screen',
+                parameters=[{
+                    'target_distance': 0.40,
+                }],
             ),
         ]),
 
