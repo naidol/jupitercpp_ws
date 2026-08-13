@@ -7,9 +7,11 @@
 # Static map:    map_server        — the pre-built apartment occupancy grid
 # Odometry:      ESP32 + EKF       — odom->base_footprint (wheel + BNO055 yaw)
 # Obstacles hi:  S2E /scan         — Nav2 ObstacleLayer (local + global), 360 deg @ 0.515m
-# Obstacles lo:  LD20 /scan_low    — Nav2 ObstacleLayer 2nd source @ ~0.13m; catches LOW furniture
-#                                    (chair legs, feet, kick-boards) the S2E plane is blind to.
-#                                    REPLACES nvblox (camera now tilted up for face-rec -> bad depth).
+# Obstacles lo:  ToF /tof/front     — Nav2 RangeSensorLayer, LOCAL costmap only, @0.085m.
+#                                    Catches LOW furniture (chair legs, feet, kick-boards) the S2E
+#                                    plane is blind to. Replaced LD20 /scan_low on 2026-08-13.
+#                                    ⚠️ ONE 25deg cone dead ahead to 1.2m — NOT a ring. Sees what
+#                                    you drive straight at; misses a chair leg 300mm off centre.
 # Camera:        Orbbec COLOR ONLY — freed for face-rec + AprilTag docking (full stack); no depth.
 # Navigation:    Nav2 MPPI (DiffDrive — vx+wz, no strafe; strafe kept only for docking)
 #

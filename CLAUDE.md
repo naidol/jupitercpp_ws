@@ -2,7 +2,9 @@
 
 ## Main Objectives
 - Build a 4-wheeled autonomous robot that includes vision, voice & brain functions
-- The robot runs on mecanum wheels and is to navigate using the ROS2 Navigation stack
+- The robot is 2-wheel DIFFERENTIAL drive with ONE rear caster 180mm behind the drive axle, and
+  navigates using the ROS2 Navigation stack. (It is NOT mecanum/omni — that was an early plan.
+  The single caster matters: it must never be commanded to pivot in place, see Docking below.)
 - The vision system must be able to perform face recognition and use April tags for docking and also recognise surrounding environment
 - The voice system should perform ASR direct voice commands to the Brain and respond via TTS
 - The Brain should interpret and respond to voice commands, using VLM or LLM
@@ -17,7 +19,10 @@
 - **Microcontroller:** ESP32 via micro-ROS (C/C++ only)
 - **Camera:** Orbbec 336 — OrbbecSDK C++ native
 - **Microphone:** ReSpeaker 3800 — ALSA interface
-- **LiDAR:** LD20 — UART serial protocol
+- **LiDAR:** Slamtec S2E — Ethernet/UDP 192.168.11.2:8089, scan plane 0.518m, mounted yaw π
+  (the LD20 that used to sit at 0.13m was physically REMOVED 2026-08-03)
+- **Front ToF:** VL53L0X on the ESP32 I2C bus — low near-field obstacles under the S2E plane
+- **Dock sensing:** 2× LJ18A3-8-Z/BX inductive prox (12V NPN) + TSAL6400 IR charge-enable beacon
 - **Development:** Direct on Jetson desktop, no cross-compilation
 
 ## Software Stack
@@ -53,9 +58,13 @@
 - Parameter-driven configuration — no hardcoded values
 
 ## Current Package Structure
-- jupiter_bringup/ — launch files, config (EKF, SLAM, Nav2)
-- jupiter_nodes/ — C++ nodes: imu_covariance_fixer, vision (VPI/AprilTags stub), diagnostics
-- ldlidar_stl_ros2/ — LD20 LiDAR driver (LD19 compatible, 6Hz, 8m indoor range)
+- jupiter_bringup/ — launch files, config (EKF, SLAM, Nav2, AMCL)
+- jupiter_nodes/ — C++ nodes: dock_aligner_v3 (current docker), dock_approach, dock_reflector,
+  dock_range, dock_ir, imu_covariance_fixer, jupiter_brain, jupiter_voice,
+  jupiter_face_recognition, jupiter_vision, scan_deskew_node
+  (dock_aligner + dock_aligner_v2 are SUPERSEDED, kept in-tree as record only)
+- sllidar_ros2/ — Slamtec S2E driver (the live lidar)
+- ldlidar_stl_ros2/ — LD20 driver, hardware removed 2026-08-03
 
 ## Standalone AI Tools (workspace root, not yet ROS2 nodes)
 - whisper.cpp — CUDA ASR (speech-to-text)
@@ -65,9 +74,20 @@
 - Python reference implementations in ~/jupiter_ws (original project pre-C++ rebuild)
 
 ## Completed Subsystems
-- Localization: EKF (robot_localization) + BNO055 IMU via micro-ROS, yaw covariance ~0.016 rad²
+- Localization: AMCL (DifferentialMotionModel) + EKF (robot_localization) + BNO055 IMU via
+  micro-ROS, yaw covariance ~0.016 rad². cuVSLAM and nvblox are RETIRED — do not reintroduce.
 - SLAM: slam_toolbox async mapping, lifecycle_manager auto-activates on launch
-- Nav2: MPPI controller (Omni motion model for mecanum), full Nav2 stack configured
+- Nav2: RegulatedPurePursuit controller + SmacPlanner2D + SimpleSmoother.
+  Local costmap = obstacle_layer (S2E /scan) + range_layer (ToF /tof/front) + inflation.
+  Global costmap = static + obstacle + inflation (ToF deliberately excluded — one narrow cone
+  carries no useful global information and would stamp phantom obstacles).
+- Docking: SOLVED 2026-08-11 by dock_aligner_v3 — POSITION control (/wheel_move count segments,
+  not /cmd_vel), ARC segments never in-place pivots (the single rear caster stalls on a pivot),
+  and POSE control (converges heading as well as position). Success = /dock/contact == 3 (both
+  prox), which gates the IR beacon -> dock SSR -> charging. V1/V2 used velocity control and
+  failed; do not resume them.
+- Chassis calibration (do NOT "tidy" these): WHEEL_SEPARATION 0.3586 m, WHEEL_RADIUS 0.050 m
+  (100mm AGV wheels), COUNTS_PER_REV 1290, caster 180mm behind the drive axle.
 - Master launch: ros2 launch jupiter_bringup jupiter_bringup_full.launch.py
   - This is the ONE full-stack launch. Do not fork a second one — jupiter_bringup.launch.py and
     jupiter_full_s2e.launch.py were deleted 2026-08-13 after drifting onto a retired stack.
@@ -81,6 +101,17 @@
 
 ## Known Issues / Workarounds
 - systemd services jupiter-microros and jupiter-lidar are DISABLED during development
+- ⚠️ DO NOT run autonomous nav in clutter. The low-obstacle layer is ONE 25° ToF cone dead ahead
+  to 1.2 m — it sees what you drive straight at and misses a chair leg 300mm off the centreline.
+  It is not the ToF ring the plan assumed (the TCA9548A mux is dead; only one sensor is fitted).
+- ⚠️ VL53L0X MOUNTING IS CRITICAL. In a light-grey printed casing the sensor returned ~4% valid
+  readings — the bore reflected its own laser into the receiver. Black matte, aperture ≥6-7mm,
+  module flush or proud, NEVER recessed. Full detail: firmware/i2c_scan/src/main.cpp.
+- ⚠️ voltageScale() in firmware compensates motor duty against MEASURED PACK voltage, but VM is
+  a regulated 12V rail — the motors never see the pack. Suspected to swing duty ~29% across a
+  discharge for no physical reason. See docs/NEW_ESP32_MOTION_CONTROL_BOARD_2026.md §9.1.
+- Thor's git had no github.com host key after the JetPack 7.2 rebuild, so it silently could not
+  fetch. Fixed 2026-08-13, but Thor's working tree still carries uncommitted drift from that gap.
 
 ## Goals for This Session
 - [Update this each session with what you want to achieve]

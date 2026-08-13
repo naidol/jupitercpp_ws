@@ -106,11 +106,13 @@ local_costmap:
       resolution: 0.05
       transform_tolerance: 0.5
       footprint: "[[-0.175, -0.20], [0.175, -0.20], [0.175, 0.20], [-0.175, 0.20]]"
-      plugins: ["obstacle_layer", "inflation_layer"]   # 2026-06-20: nvblox RETIRED -> LD20 low lidar (scan_low) is now the low-obstacle source
+      # 2026-08-13: scan_low source REMOVED (LD20 gone since 2026-08-03, /scan_low never
+      # published again). Low-obstacle sensing is now range_layer, below.
+      plugins: ["obstacle_layer", "range_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: scan scan_low
+        observation_sources: scan
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -121,22 +123,33 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 7.5
           obstacle_min_range: 0.0
-        # scan_low — LD20 lidar at ~0.13 m. Catches LOW furniture (chair legs, feet, kick-boards)
-        # the S2E at 0.515 m is blind to; replaces nvblox without the camera/GPU cost. The robot's own
-        # 4 corner uprights + low clutter all return < 0.20 m, so BOTH min ranges are 0.30 m: anything
-        # closer is ignored for marking AND clearing (no phantom self-obstacle, no false-clearing past
-        # a blocked beam). 2026-06-20.
-        scan_low:
-          topic: /scan_low
-          max_obstacle_height: 2.0
-          clearing: true
-          marking: true
-          data_type: "LaserScan"
-          raytrace_max_range: 3.5
-          raytrace_min_range: 0.30
-          obstacle_max_range: 3.0
-          obstacle_min_range: 0.30
         decay_time: 5.0
+
+      # range_layer — front VL53L0X ToF on /tof/front (sensor_msgs/Range, ~7 Hz, frame
+      # tof_front_link at 165mm fwd / 85mm up / 8deg nose-up). Replaces the LD20's scan_low
+      # as the LOW obstacle source: catches chair legs, feet and kick-boards under the S2E's
+      # 0.518 m scan plane.
+      #
+      # ⚠ COVERAGE IS ONE 25deg CONE, DEAD AHEAD, TO 1.2 m. It is not the ToF ring the plan
+      # assumed. It sees a box or wall driven straight at, and MISSES a chair leg 300mm off
+      # the centreline. Do NOT relax "no autonomous nav in clutter" on the strength of it.
+      #
+      # The firmware publishes range == max_range for "nothing detected" (NOT +Inf) because
+      # processVariableRangeMsg discards anything above max_range before it can act — with
+      # +Inf the cone would mark once and never clear. See firmware/esp32/src/firmware.ino.
+      range_layer:
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: true
+        topics: ["/tof/front"]
+        input_sensor_type: VARIABLE     # reports true distance, not a fixed trip point
+        clear_on_max_reading: true      # pairs with the max_range convention above
+        # 0.0 DISABLES the stale-data watchdog, deliberately. A non-zero timeout marks the
+        # layer not-current when readings stop, which stalls costmap updates and can halt
+        # Nav2. A ToF failure must never cost us navigation — same principle as the
+        # firmware's tof_present latch.
+        no_readings_timeout: 0.0
+        mark_threshold: 0.80
+        clear_threshold: 0.20
       # nvblox_layer RETIRED 2026-06-20: camera tilted 5.7deg nose-UP for face-rec -> depth grazes the
       # floor at the FOV bottom edge -> unreliable ESDF. The LD20 low lidar (scan_low, above) now owns
       # the low-obstacle job. Block kept (enabled:false, off the plugins list) for quick re-enable.
@@ -176,14 +189,19 @@ global_costmap:
       # static_layer stamps the pre-built apartment map into the GLOBAL costmap so the
       # planner routes around real walls (it was missing — planner saw only live lidar +
       # unknown space and cut diagonals straight through walls/furniture). 2026-06-09.
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]   # 2026-06-20: nvblox RETIRED from global too -> LD20 scan_low gives Smac the low furniture to route around
+      # 2026-08-13: scan_low source REMOVED (LD20 gone since 2026-08-03). The front ToF is
+      # deliberately NOT added here — a single 25deg cone reaching 1.2 m carries no useful
+      # information for a global planner, and stamping it into the global costmap would
+      # leave permanent phantom obstacles wherever the robot happened to be pointing.
+      # Low-obstacle sensing is local-costmap only: see range_layer above.
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: scan scan_low
+        observation_sources: scan
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -194,18 +212,6 @@ global_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 7.5
           obstacle_min_range: 0.0
-        # scan_low — LD20 at ~0.13 m gives Smac the LOW furniture (chair legs, feet) to route AROUND,
-        # the role nvblox held in the global costmap. Same 0.30 m min ranges to mask the robot's own
-        # uprights/clutter. 2026-06-20.
-        scan_low:
-          topic: /scan_low
-          max_obstacle_height: 2.0
-          clearing: true
-          marking: true
-          data_type: "LaserScan"
-          raytrace_max_range: 3.5
-          raytrace_min_range: 0.30
-          obstacle_max_range: 3.0
           obstacle_min_range: 0.30
         decay_time: 10.0
       # nvblox_layer RETIRED from GLOBAL 2026-06-20 (see local costmap note): tilted camera depth is

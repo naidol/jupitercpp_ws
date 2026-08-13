@@ -713,9 +713,13 @@ static void publish_tof()
 
     float range_m;
     if (raw_mm >= TOF_NO_TARGET_MM) {
-        // REP-117: nothing detected within range reports +Inf. Publishing max_range instead
-        // would read to a naive consumer as a solid obstacle sitting at exactly max_range.
-        range_m = INFINITY;
+        // "Nothing within range" publishes EXACTLY max_range, not the +Inf that REP-117
+        // suggests. This is deliberate and it is what the consumer requires:
+        // nav2_costmap_2d::RangeSensorLayer::processVariableRangeMsg REJECTS any reading above
+        // max_range before it can act, so +Inf would be silently discarded — the cone would
+        // mark an obstacle once and then NEVER clear it. The layer's clear_on_max_reading
+        // keys on range == max_range, which is the sonar/ToF convention it was written for.
+        range_m = TOF_MAX_RANGE_M;
     } else {
 #if TOF_APPLY_CALIBRATION
         range_m = (((float)raw_mm - TOF_CAL_OFFSET_MM) / TOF_CAL_SCALE) / 1000.0f;
@@ -723,7 +727,9 @@ static void publish_tof()
         range_m = (float)raw_mm / 1000.0f;
 #endif
         if (range_m < TOF_MIN_RANGE_M) range_m = TOF_MIN_RANGE_M;
-        if (range_m > TOF_MAX_RANGE_M) range_m = INFINITY;
+        // Beyond our usable range is also "clear to max": the cone up to max_range really is
+        // empty, so it must clear rather than be thrown away.
+        if (range_m > TOF_MAX_RANGE_M) range_m = TOF_MAX_RANGE_M;
     }
 
     struct timespec ts = getTime();
