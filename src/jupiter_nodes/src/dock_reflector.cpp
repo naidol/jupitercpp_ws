@@ -8,7 +8,7 @@
 // observation, reducing ambiguity at the funnel mouth. This node now prefers a validated
 // LEFT-CENTER-RIGHT triplet and falls back to side-pair geometry when only two strips are visible.
 //
-// STRIPS: left/right vertical retro strips ~250 mm centre-to-centre + one center strip at
+// STRIPS: left/right vertical retro strips 210 mm centre-to-centre (20 mm wide) + one center strip at
 // midpoint, all spanning the S2E scan-plane height.
 //
 // METHOD:
@@ -85,19 +85,29 @@ public:
 
     // Side-strip geometry validation (rigid, range-independent).
     //
-    // 2026-08-14: 0.25 -> 0.205. The dock's outer strips were re-made in the same material as
-    // the centre strip and repositioned to sit vertically above the robot's rear prox sensors;
-    // measured centre-to-centre is 205 mm, strips 20 mm wide.
+    // 2026-08-14: 0.25 -> 0.210. The dock's outer strips were re-made in the same material as
+    // the centre strip and repositioned to sit vertically above the robot's rear prox sensors.
+    // STRIP spacing is 210 mm centre-to-centre, strips 20 mm wide.
     //
-    // ⚠ THIS PARAMETER IS NOT COSMETIC. At 205 mm against a 250 mm expectation the triplet still
-    // squeaks inside baseline_tol (200-300 mm) and is ACCEPTED — but sep_score is
-    // 1 - (45/50) = 0.10, which drags total confidence under dock_aligner_v3's min_confidence
+    // Do NOT confuse this with the 205 mm rear PROX SENSOR spacing quoted in dock_aligner_v3 —
+    // they are two different measurements. The strips sit approximately, not exactly, above the
+    // prox sensors (210 vs 205 mm, i.e. 2.5 mm wider per side).
+    //
+    // CONFIRMED TWO WAYS, seated at contact=3: tape says 210 mm, and the detector's own cluster
+    // centroids give 210-211 mm (left -102.8, centre +2.1, right +107.5 mm lateral), with the
+    // centre strip 0.25 mm off the midpoint of the outer pair. Range read 0.192 m against
+    // seated_range_m 0.1930, so that calibration still holds against the new strips.
+    //
+    // ⚠ THIS PARAMETER IS NOT COSMETIC. At a true 210 mm against a stale 250 mm expectation the
+    // triplet still squeaks inside baseline_tol (200-300 mm) and is ACCEPTED — but sep_score is
+    // 1 - (40/50) = 0.20, which drags total confidence under dock_aligner_v3's min_confidence
     // 0.70 gate. The aligner then refuses to acquire and reports "no usable dock lock", which
     // reads as a detection or hardware fault rather than a geometry mismatch. Whenever the dock
     // strips move, this value MUST move with them.
+    // Measured effect of getting it right: confidence 0.924 (at 0.205) -> 0.935 (at 0.210).
     //
     // center_spacing_expected derives from this (x0.5), so it follows automatically.
-    baseline_expected_ = declare_parameter("baseline_expected", 0.205);  // m, centre-to-centre
+    baseline_expected_ = declare_parameter("baseline_expected", 0.210);  // m, centre-to-centre
     baseline_tol_      = declare_parameter("baseline_tol",      0.05);    // m accept window
 
     // Three-strip geometry validation.
