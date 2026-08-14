@@ -84,7 +84,20 @@ public:
     min_points_    = declare_parameter("min_points",    4);       // per cluster; narrow strips give few beams at range
 
     // Side-strip geometry validation (rigid, range-independent).
-    baseline_expected_ = declare_parameter("baseline_expected", 0.25);   // m, centre-to-centre
+    //
+    // 2026-08-14: 0.25 -> 0.205. The dock's outer strips were re-made in the same material as
+    // the centre strip and repositioned to sit vertically above the robot's rear prox sensors;
+    // measured centre-to-centre is 205 mm, strips 20 mm wide.
+    //
+    // ⚠ THIS PARAMETER IS NOT COSMETIC. At 205 mm against a 250 mm expectation the triplet still
+    // squeaks inside baseline_tol (200-300 mm) and is ACCEPTED — but sep_score is
+    // 1 - (45/50) = 0.10, which drags total confidence under dock_aligner_v3's min_confidence
+    // 0.70 gate. The aligner then refuses to acquire and reports "no usable dock lock", which
+    // reads as a detection or hardware fault rather than a geometry mismatch. Whenever the dock
+    // strips move, this value MUST move with them.
+    //
+    // center_spacing_expected derives from this (x0.5), so it follows automatically.
+    baseline_expected_ = declare_parameter("baseline_expected", 0.205);  // m, centre-to-centre
     baseline_tol_      = declare_parameter("baseline_tol",      0.05);    // m accept window
 
     // Three-strip geometry validation.
