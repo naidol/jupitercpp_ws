@@ -209,8 +209,13 @@ public:
     // BACK-OFF RETRY (Logan's call, 2026-08-11). On a partial seat, reverse OUT far enough to be
     // clear of the throat and above commit_range, then re-plan and re-approach. Rationale: the
     // residual error at the seat is HEADING, not position -- a run reached lateral -0.0007 m
-    // (0.7 mm!) but 2.2 deg of skew, and 2.2 deg across the ~300 mm prox spacing is ~11 mm at the
-    // corners, past an inductive sensor's ~8 mm range. That skew is geometrically coupled to the
+    // (0.7 mm!) but 2.2 deg of skew. [CORRECTED 2026-08-14: this said "~300 mm prox spacing",
+    // which was an estimate; Logan measured the rear prox sensors at 205 mm centre-to-centre.
+    // So 2.2 deg gives 205*tan(2.2) = ~7.9 mm at the corners, not ~11 mm. That is right ON an
+    // inductive sensor's ~8 mm range rather than comfortably past it -- so the skew argument
+    // still holds, but by a much thinner margin than the original note implied, and a slightly
+    // shorter sensor range or a slightly larger skew is the difference between contact=3 and
+    // contact=2.] That skew is geometrically coupled to the
     // residual offset through the carrot lookahead, so it cannot be nudged out in place -- but a
     // fresh approach from a freed position gets another attempt at nulling it.
     // TWO mechanisms, cheapest first (Logan, 2026-08-11):
