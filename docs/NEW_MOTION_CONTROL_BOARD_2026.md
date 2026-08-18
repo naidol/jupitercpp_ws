@@ -401,6 +401,54 @@ removes the 100 k/20 k divider, its filter cap, one ADC channel, the ESP32 ADC's
 `esp_adc_cal` — **and retires §10.2 entirely**, since the "100 k/20 k or 100 k/22 k?" question stops
 mattering. Voltage and current both arrive over I²C, pre-calibrated.
 
+#### Physical header mapping (verified against the DevKitC-1 pinout, 2026-08-19)
+
+```
+  LEFT HEADER                          RIGHT HEADER
+  ───────────────────────────          ───────────────────────────
+  3V3                                  GND
+  3V3                                  GPIO43  ── UART0 TX (console)
+  RST (EN)                             GPIO44  ── UART0 RX (console)
+  GPIO4    — spare ADC                 GPIO1   M1_ISENSE   ADC1_CH0
+  GPIO5    M2_ENC_B                    GPIO2   M2_ISENSE   ADC1_CH1
+  GPIO6    PROX_LEFT                   GPIO42  M2_DIR      ⚠ pull-down
+  GPIO7    PROX_RIGHT                  GPIO41  M2_PWM      ⚠ pull-down
+  GPIO15   IMU_RST                     GPIO40  M1_ENC_B
+  GPIO16   I2C_SDA                     GPIO39  M1_ENC_A
+  GPIO17   I2C_SCL                     GPIO38  M1_DIR      ⚠ pull-down
+  GPIO18   MUX_RST                     GPIO37  ── OCTAL PSRAM (R8)
+  GPIO8    IR_EMIT                     GPIO36  ── OCTAL PSRAM (R8)
+  GPIO3    ── strapping                GPIO35  ── OCTAL PSRAM (R8)
+  GPIO46   ── strapping                GPIO0   ── BOOT / strapping
+  GPIO9    — SPARE                     GPIO45  ── strapping (VDD_SPI)
+  GPIO10   IMU_CS    FSPICS0           GPIO48  STATUS_LED  onboard RGB
+  GPIO11   IMU_MOSI  FSPID             GPIO47  M2_ENC_A
+  GPIO12   IMU_SCLK  FSPICLK           GPIO21  M1_PWM      ⚠ pull-down
+  GPIO13   IMU_MISO  FSPIQ             GPIO20  ── USB D+
+  GPIO14   IMU_INT                     GPIO19  ── USB D-
+  5V                                   GND
+  GND                                  GND
+```
+
+**▶ LEFT = sensors, RIGHT = motors.** That split fell out of the assignment and is worth
+preserving at layout: it keeps the 8 kHz motor switching edges away from the I²C/SPI sensor bus
+for free. Place the socket so the motor connectors and drivers sit on the RIGHT side, the mux,
+ToF connectors and IMU on the LEFT.
+
+**Confirmed against the DevKitC-1 pinout diagram:**
+
+- **ADC1 = GPIO1–10** (CH0→CH9). ADC2 occupies GPIO11–20 and is dead with WiFi, so those pins are
+  correctly used for digital only.
+- **IMU SPI lands on native FSPI IO_MUX pins** — `FSPICS0=10, FSPID=11, FSPICLK=12, FSPIQ=13`.
+  Fast path, not via the GPIO matrix.
+- **GPIO35/36/37 are broken out but carry SPIIO6/SPIIO7/SPIDQS** — the octal PSRAM signals,
+  unusable on R8. **GPIO33/34 are not brought out at all.** The map avoids all five.
+- **GPIO39–42 are the JTAG pins** (MTCK/MTDO/MTDI/MTMS), used here as motor I/O. This forfeits an
+  *external* JTAG probe but **not USB-Serial-JTAG**, which runs over the USB peripheral
+  (GPIO19/20). The §2.3 debug channel is unaffected.
+- **STATUS_LED on GPIO48 is the addressable RGB** — drive with `neopixelWrite()`, not
+  `digitalWrite()`.
+
 #### Rules that travel with this pin map
 
 1. **10 k pull-downs on all four motor drive pins.** Non-negotiable — a floating-input cold-boot
