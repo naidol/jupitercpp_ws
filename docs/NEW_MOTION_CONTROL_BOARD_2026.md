@@ -91,9 +91,31 @@ the dual-core pinning is load-bearing (IR burst timing on core 0, micro-ROS on c
 path uses `esp_adc_cal`. The 4-state auto-reconnect machine, position-control (`/wheel_move`) mode
 and the prox reflex would all need revalidating from scratch.
 
-**Gate on one question, before any other work:** does micro-ROS support RP2350 to the same standard
-as ESP32? The entire firmware architecture is micro-ROS. If that answer is not solid, the
-evaluation stops there.
+**GATE CHECKED 2026-08-19 — NOT CLEARED.** The official
+`micro-ROS/micro_ros_raspberrypi_pico_sdk` is titled *"Raspberry Pi Pico (RP2040) and micro-ROS
+integration"* and contains **no mention of RP2350, Pico 2 or `PICO_PLATFORM`**.
+
+The crux is the precompiled `libmicroros.a`: built for **Cortex-M0+ (ARMv6-M, soft-float)**, where
+RP2350 is **Cortex-M33 (ARMv8-M, hard-float FPU)**. Using it means rebuilding micro-ROS against a
+`cortex-m33` toolchain with a matching float ABI. micro-ROS supports custom builds so this is
+likely achievable — but it is a project in itself and unproven on this target. Treat any claim
+that RP2350 + micro-ROS is turnkey with suspicion until someone has actually built it.
+
+⚠ **Beware RP2350-vs-RP2040 arguments.** Most published enthusiasm for RP2350 + micro-ROS compares
+it to the RP2040, not to an ESP32. Checked against this firmware, those advantages evaporate:
+
+| Common claim | Against Jupiter |
+|---|---|
+| 520 KB SRAM removes memory pressure | Firmware uses **22.3% — 73 KB of 327 KB**. No pressure exists |
+| Hardware FPU vs software emulation | ESP32's Xtensa LX6 **already has a single-precision FPU** |
+| Dedicate core 0 to micro-ROS, core 1 to control | Firmware **already pins cores** (`xTaskCreatePinnedToCore`, IR task on core 0) |
+| `rcl` deadlocks across cores were an RP2040 flaw | `rcl`/`rclc` is not thread-safe on any MCU — a micro-ROS constraint, not silicon |
+| Eliminates custom serial parsers | There are none. micro-ROS has been the transport since the start |
+| Native USB-CDC, no UART bridge | Real win over the CP2102 — but **ESP32-S3 has native USB too** |
+
+**What survives as a genuine RP2350 advantage over ESP32-S3: PIO encoder decoding. That is the
+whole list.** The honest trade is hardware quadrature decoding, bought with a firmware rewrite and
+an unproven micro-ROS port.
 
 ### 2.5 IMU — BNO055 vs BNO085
 
