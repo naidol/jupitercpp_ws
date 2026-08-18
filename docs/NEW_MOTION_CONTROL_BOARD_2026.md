@@ -449,6 +449,33 @@ ToF connectors and IMU on the LEFT.
 - **STATUS_LED on GPIO48 is the addressable RGB** — drive with `neopixelWrite()`, not
   `digitalWrite()`.
 
+#### Resistor summary (schematic checklist)
+
+| Value | Qty | Where | Why |
+|---|---|---|---|
+| **10 kΩ pull-DOWN → GND** | **5** | GPIO21, 38, 41, 42 (motor PWM/DIR) + GPIO8 (IR gate) | ⚠ SAFETY — holds DRV8870 inputs in COAST through the boot float window (recorded wheel spin), and holds the IR beacon off so dock pins cannot energise at boot |
+| **10 kΩ pull-UP → 3V3** | 3 | GPIO10 IMU_CS, GPIO15 IMU_RST, GPIO18 MUX_RST | active-low, or must idle deasserted while the pin floats |
+| **4.7 kΩ pull-UP → 3V3** | 2 | GPIO6, GPIO7 (prox) | NPN open-collector sensors; do not depend on firmware `INPUT_PULLUP` |
+| **2.2 kΩ pull-UP → 3V3** | 2 | GPIO16 SDA, GPIO17 SCL | upstream I²C at 400 kHz (§9) |
+| 1 kΩ + 100 nF | 2 ea | GPIO1, GPIO2 (ISENSE) | anti-alias / protect the ADC input |
+| 100 Ω series | 1 | GPIO8 → MOSFET gate | §7 |
+| 10 kΩ series + BAT54S | 2 ea | prox inputs | 12 V open-collector into a 3.3 V pin (§6) |
+
+Encoder pins need **no** pull-ups: `encoder.cpp` uses plain `pinMode(INPUT)` and odometry works,
+so the encoders are push-pull.
+
+#### ⚠ The three that bite
+
+1. **The two `3V3` header pins must NOT be connected.** They are the DevKit's LDO *output*. Tying
+   them to the board's SSP1117 rail puts two regulators in contention. Feed **5 V** only, share
+   **GND**, keep the rails separate — as ver3_1 does.
+2. **The five pull-downs are safety, not tidiness.** Four hold the motor driver inputs defined
+   through boot; the fifth keeps the IR beacon silent so the dock cannot be asked to energise its
+   pins before firmware runs.
+3. **Eleven pins are deliberately unconnected** — 3 × octal PSRAM (35/36/37), 4 × strapping
+   (0/3/45/46), 2 × USB (19/20), 2 × spare (4/9). **Mark them NC on the schematic**, or a later
+   revision will "helpfully" route something to GPIO36.
+
 #### Rules that travel with this pin map
 
 1. **10 k pull-downs on all four motor drive pins.** Non-negotiable — a floating-input cold-boot
