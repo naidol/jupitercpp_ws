@@ -37,6 +37,10 @@ MCU-independent unless explicitly marked.
 | 6 | **Strapping-pin pull-downs needed** | Not on ver3_1 at all. See §8 — this is the most likely cause of intermittent boot failures |
 | 7 | **I²C expansion:** TCA9548A mux + up to 7 × VL53L0X ToF | New. Currently hand-wired and **not working** — see §9 |
 | 8 | Position-control mode (`/wheel_move`) added to firmware | Software only, no PCB impact |
+| 9 | **BNO055 → BNO086**, magnetometer for off-map use | §2.5. Place away from motors; SPI + INT/RST |
+| 10 | **SSD1306 OLED deleted** | §9. Purpose gone, invisible in service, `setup()` hang risk |
+| 11 | **Pack + motor current sensing added** | §5, §4. Both target measured defects, not spec-chasing |
+| 12 | **MCU not fixed** — WROOM-32 / S3 / RP2350 | §2. Board is specified MCU-neutral; socket the module |
 
 ---
 
@@ -117,31 +121,93 @@ it to the RP2040, not to an ESP32. Checked against this firmware, those advantag
 whole list.** The honest trade is hardware quadrature decoding, bought with a firmware rewrite and
 an unproven micro-ROS port.
 
-### 2.5 IMU — BNO055 vs BNO085
+### 2.5 IMU — DECIDED: BNO086, magnetometer fitted but not trusted by default
 
-⚠ **The stock comparison does not apply to this robot, because the firmware runs IMUPLUS.**
+**Decision (2026-08-19): fit the BNO086.** The reasoning is not the usual spec-sheet comparison,
+which does not apply here — it is off-map operation. Both parts of that matter, so both are recorded.
+
+#### Why the stock BNO055-vs-BNO08x comparison does NOT apply indoors
+
+The firmware already runs magnetometer-free:
 
 ```cpp
 // imu_bno055.cpp — magnetometer is already OUT of the fusion loop
 bno.setMode(OPERATION_MODE_IMUPLUS);
 ```
 
-| Common claim for BNO085 | Against this robot |
+| Common claim for BNO08x | Against this robot |
 |---|---|
-| Drift 1–2°/min → <0.5°/min | **Not comparable.** Those are 9-DOF figures. IMUPLUS yaw is pure gyro integration; the BNO085's magnetometer-free mode (Game Rotation Vector) drifts for the same physical reason. No magnetometer, no absolute reference — physics, not silicon |
-| Calibration "drops state randomly" | Mag calibration is irrelevant in IMUPLUS, and stored gyro/accel offsets are restored at boot. Already a solved item |
-| I²C clock stretching hangs the bus | A **Broadcom BCM2835 (Raspberry Pi)** defect. ESP32 I²C handles stretching correctly — BNO055 + SSD1306 run at 400 kHz with no reported hangs. RP2350's I²C block also handles it |
+| Drift 1–2°/min → <0.5°/min | **Not comparable.** Those are 9-DOF figures. IMUPLUS yaw is pure gyro integration; the BNO08x's magnetometer-free mode (Game Rotation Vector) drifts for the same physical reason |
+| Calibration "drops state randomly" | Mag calibration is irrelevant in IMUPLUS, and stored gyro/accel offsets are restored at boot |
+| I²C clock stretching hangs the bus | A **Broadcom BCM2835 (Raspberry Pi)** defect. ESP32 and RP2350 I²C both handle stretching correctly |
 | 100 Hz → 400 Hz report rate | IMU publishes at ~18 Hz. Nowhere near the constraint |
-| Built-in Tare | Genuinely nicer than offset math, but offset restore already works |
+| Built-in Tare | Nicer than offset math, but offset restore already works |
 
-**Verdict: the BNO085 is a better part but does not fix a problem this robot has.** The one real
-BNO055 weakness — magnetometer instability — was engineered around in July by switching to
-IMUPLUS. Absolute heading would need a magnetometer, which was deliberately rejected because the
-motors swamp it; a BNO085 in the same chassis eats the same interference.
+**And magnetic heading is unusable indoors regardless of chip.** Hard/soft-iron calibration
+corrects distortion **fixed relative to the sensor** (the robot's own steel). Rebar is fixed
+relative to the **building** — as the robot drives the distortion changes, and no calibration can
+track a field that varies with position. Reinforced concrete, structural steel, AC wiring and lift
+motors make indoor magnetic north unreliable *in principle*.
 
-Blast radius if swapped anyway: **176 lines** (`imu_bno055.h` + `.cpp`), a different library
-(SH-2 / Adafruit BNO08x), and a recalibration. Contained, low-risk, defensible on a respin —
-just do not expect less heading drift.
+Indoors the absolute heading reference is the **map** (AMCL + S2E), plus the **dock** — `contact=3`
+is a known pose to millimetres, so every successful docking is a heading re-zero more trustworthy
+than any magnetometer.
+
+#### Why fit a 9-axis part anyway — off-map operation
+
+The robot may leave the map: building lobby, paved garden. There AMCL has nothing to match and
+dead reckoning drifts without bound.
+
+**The magnetometer is strongest exactly where the lidar is weakest.** An open paved area has few
+walls and little structure, so scan matching degrades — while the magnetic environment is at its
+cleanest. Indoors the reverse holds. They fail in opposite environments, which makes them
+complementary rather than redundant.
+
+Second use: **re-entering the map.** Global re-localisation is slow and error-prone; an absolute
+heading prior collapses the search space.
+
+⚠ Temper expectations for the **lobby** — still rebar in the slab, structural steel, and **lift
+motors**, among the largest magnetic disturbers there are. The **paved garden** is the realistic case.
+
+This requirement also **rules out 6-axis alternatives** (e.g. ICM-42688-P, which has better raw gyro
+performance but no magnetometer at all).
+
+#### Architecture: mode-switchable, gated on the sensor's own trust signal
+
+Not "magnetometer on or off":
+
+- **Indoors** — Game Rotation Vector (6-axis, mag-free) → `/imu/data`, as today
+- **Outdoors** — Rotation Vector (9-axis, mag-fused) when absolute heading is wanted
+- **Gate on the sensor, not a manual switch.** The BNO08x reports a **per-report accuracy status
+  (0–3)** and a heading accuracy estimate. Publish it, and the EKF or a supervisor can weight or
+  reject magnetic yaw dynamically. The indoor→outdoor transition is gradual, not binary — walking
+  out of a doorway the field improves progressively and the accuracy estimate tracks it.
+
+Ties into [[project_operational_modes]]: "outdoor mode" becomes a profile that enables the 9-axis
+report and permits the EKF to trust absolute yaw.
+
+#### ⚠ Layout constraint — because the magnetometer WILL be used
+
+Since the magnetometer is not merely decorative, **placement matters**:
+
+- Put the IMU at the **opposite end of the board** from the motor drivers and the power stage
+- Keep high-current motor and pack traces well clear of it
+- Preferably footprint it on a **small daughterboard on a ribbon**, so it can be mounted higher on
+  the chassis and away from the drive train entirely
+
+Note this only helps with *static* robot-fixed distortion. A motor drawing amps produces a
+**dynamic** field that no calibration tracks — separation is the only mitigation, and it is only
+cheap to arrange while the board is being drawn.
+
+#### Practicalities
+
+- **Interface: SPI preferred** over I²C — keeps the IMU off the bus about to carry the mux and
+  several ToFs. Costs a few pins, which are available.
+- **INT and RST must be brought out.** The SH-2 protocol is interrupt-driven and misbehaves without them.
+- **Blast radius:** ~176 lines (`imu_bno055.h` + `.cpp`), a different library (SH-2 / Adafruit
+  BNO08x), and a recalibration. Contained.
+- Do **not** expect less heading drift indoors — Game Rotation Vector drifts like IMUPLUS does.
+  The gain is off-map capability and better fusion, not indoor accuracy.
 
 ### 2.6 Recommendation
 
@@ -151,7 +217,10 @@ gated evaluation.
 - **ESP32-S3** is the low-risk modernisation: retires the 2016-era part *and* the CP2102, keeps
   the firmware, toolchain, WiFi and micro-ROS path essentially intact.
 - **RP2350** only after the micro-ROS question is answered, and understanding it is a rewrite.
-- **BNO085** optional — take it as a part upgrade, not as a fix.
+- **BNO086 — DECIDED (§2.5).** Fitted for off-map operation (garden/lobby), magnetometer
+  available but not trusted by default. Place it away from the motors and power stage.
+- **SSD1306 OLED — DELETED (§9).** Its only job was BNO055 figure-8 calibration monitoring; it
+  is invisible once the robot is assembled, and it hard-hangs `setup()` when absent.
 
 Whatever is chosen, footprint the board so the **MCU sits on a module/socket** rather than being
 soldered down, so a future change does not mean another respin.
@@ -240,6 +309,26 @@ Recommendation: **2 channels**. The chassis is committed to 2WD + caster, and th
 solution (`dock_aligner_v3`) is built around exactly that geometry — arc segments sized around a
 single rear caster. Going back to 4WD would invalidate it.
 
+### ▶ ADD: motor current sensing
+
+The DRV8870's **ISEN** pin already develops a voltage across the 200 mΩ sense resistor — add a
+current-sense amplifier per channel and that becomes a measurable motor current.
+
+This targets a live defect. Stall detection is currently **inferred from encoder progress rate**,
+which is why a segment that actually travelled 0.284 m against a commanded 0.250 m was still
+declared `STALLED` (2026-08-14). The wheels were turning at roughly half speed, not locked.
+
+Real current distinguishes the three cases the firmware currently cannot:
+
+| | Current | Encoder progress |
+|---|---|---|
+| Locked rotor / jam | **high** | none |
+| Running slow (loop not settled) | moderate | slow |
+| Open circuit / disconnected motor | **none** | none |
+
+That turns `MOVE_STALL_MS` from a timing heuristic into a measurement, and it would have made the
+docking failures diagnosable in one run rather than three.
+
 ---
 
 ## 5. Battery monitoring
@@ -266,6 +355,23 @@ Currently a flying divider. Make it a designed block.
 - GPIO34 is **input-only** — no internal pull-up/down exists, which is exactly why it's a good ADC pin.
 - Full scale check: 16.8 V × 0.1667 = **2.80 V**, inside the 11 dB attenuation range (~3.1 V). Good,
   with headroom. Do not raise the divider ratio.
+
+### ▶ ADD: pack CURRENT sensing (INA226 or shunt + amplifier)
+
+Voltage alone is why `power_supply_status` is **hardcoded** — the firmware cannot tell charging
+from discharging, and today reports "discharging" while the pack climbs.
+
+More importantly, there is an open parking-lot item to *"measure charge-in vs draw per load"*,
+raised because **the robot drained flat on the dock twice**: charge-in (~75 W dock) was less than
+full-bringup draw, so it net-discharged while apparently charging. That question cannot be answered
+without current measurement, and it will recur every time the load profile changes.
+
+Fitting an **INA226** (I²C, high-side, bidirectional) on the pack gives:
+
+- true charge/discharge current and direction → an honest `power_supply_status`
+- coulomb counting → real state-of-charge instead of a voltage guess
+- the data to size the docked "charging companion" low-power profile properly
+- early warning that a docked robot is net-discharging, before it goes flat
 
 ---
 
@@ -369,11 +475,26 @@ on power-up is a robot that can drive off a bench.
 | Device | Address | Notes |
 |---|---|---|
 | BNO055 IMU | `0x28` | on-board, works |
-| SSD1306 OLED | `0x3C` | on-board, works |
+| ~~SSD1306 OLED~~ | ~~`0x3C`~~ | **DELETED on the new board — see below** |
 | TCA9548A mux | `0x70` | **hand-wired, never enumerated — treated as dead** |
 | VL53L0X ToF | `0x29` | all identical, hence the mux |
 
 `Wire.begin(21, 22)` at **400 kHz** (BNO055 fast mode).
+
+### SSD1306 OLED — deleted
+
+Fitted on ver3_1 to watch BNO055 figure-8 calibration convergence. **Remove it.** Three reasons:
+
+1. Its job is gone. The BNO086 self-calibrates in the background, and the figure-8 ritual with it.
+2. It is **invisible in service** — mounted on chassis level 1, nobody sees it once assembled.
+   The 7" panel (`jupiter_display`) is the real user surface.
+3. It is a **hard-hang risk**. Parking-lot item: `setup_oled_display()` spins in a `for(;;)` if the
+   OLED does not answer, so a dead or unpowered display bricks the whole MCU before micro-ROS
+   starts — brain-dead in exactly the safe-debug state. Deleting the part deletes the failure mode.
+
+**Keep the bench capability without the part:** the keyed I²C header needed for the mux doubles as
+an OLED port, so one can be plugged in temporarily for bench work. On an ESP32-S3 the
+USB-Serial-JTAG console supersedes it entirely (§2.3).
 
 ### The mux, honestly
 
@@ -394,7 +515,7 @@ never at fault. The chip is marked **PW548A** — a clone — where a TI part wa
 
 | Segment | Requirement |
 |---|---|
-| Upstream (ESP32 ↔ mux, IMU, OLED) | **2.2 k** to 3.3 V. 4.7 k is marginal at 400 kHz once several devices and cable capacitance are on the bus |
+| Upstream (MCU ↔ mux, IMU) | **2.2 k** to 3.3 V. 4.7 k is marginal at 400 kHz once several devices and cable capacitance are on the bus |
 | Each downstream channel | **4.7 k** to 3.3 V, **on the board**, one pair per active channel |
 
 The TCA9548A does **not** pass pull-ups through — every downstream segment needs its own pair.
@@ -403,12 +524,26 @@ module is plugged in.
 
 ### ToF power budget
 
-7 × VL53L0X at ~20 mA ≈ **140 mA** on 3.3 V, plus IMU, OLED and the mux. That is a material load —
+7 × VL53L0X at ~20 mA ≈ **140 mA** on 3.3 V, plus the IMU and the mux. That is a material load —
 see §11, it is the main argument for replacing the linear regulators.
 
 Keep the ToFs on **3.3 V**. Measured: 22.9 MCPS of return signal on the 3.3 V rail is a perfectly
 healthy VCSEL. An earlier theory that the GY-530's onboard LDO was browning out at 3.3 V was
 tested and is **wrong**.
+
+### ⚠ Reconsider the ToF part — VL53L5CX multizone
+
+The near-field blind wedge measured on 2026-08-14 is a **single-zone geometry limitation**, not a
+mounting error: one ~25° cone means tilting up to reject the floor necessarily blinds you to low
+objects nearby. At 85 mm and 8° up-tilt, a shoe-box-height object at 389 mm is invisible.
+
+A **VL53L5CX** (4×4 or 8×8 zones, ~63° FoV) resolves floor and obstacle in **different zones
+simultaneously**, so the trade disappears — no tilt compromise, and far fewer sensors needed for
+the same coverage. It addresses the measured defect rather than working around it.
+
+Costs to check before committing: larger I²C payload (64 zones), more host processing, higher unit
+price, and different footprint/optics. Worth evaluating against VL53L0X while the board is open,
+since connector choice and bus budget depend on it.
 
 ### ⚠ Mechanical warning — this is not a PCB problem but it will waste a day
 
@@ -500,7 +635,7 @@ itself. One input, one fuse, one reverse-protection stage, one less box to mount
                                                                                      ├──► IR emitter driver (§7)
                                                                                      └──► SSP1117-3.3 ──► 3.3 V
                                                                                               │
-                                                                                              └──► IMU, OLED, mux, 7 × ToF
+                                                                                              └──► IMU, mux, 7 × ToF
 ```
 
 **Two switchers and one linear.** 5 V is derived from the 12 V rail rather than from the pack, so
@@ -517,7 +652,7 @@ SSP1117-3.3 is retained**, simply re-sourced from 5 V instead of 12 V.
 |---|---|---|
 | **12 V** | 2 × DRV8870 VM, prox sensors, buck #2 | **≤ 3.3 A** motors (see sizing) + ~0.2 A |
 | **5 V** | ESP32 DevKit VIN, IR driver, J3 | ~250–350 mA |
-| **3.3 V** | BNO055, OLED, mux, 7 × ToF, VREF | ~200–400 mA |
+| **3.3 V** | BNO086, mux, 7 × ToF, VREF | ~200–400 mA |
 
 Note the ESP32 DevKit does **not** sit on the 3.3 V rail — ver3_1 feeds it 5 V into VIN and it
 regulates its own 3.3 V onboard.
@@ -647,15 +782,25 @@ Add:
 
 ## 13. Bill of materials — changes from ver3_1
 
-**Remove:** 2 × DRV8870DDAR (U3, U4), 2 × 200 mΩ (R3, R4), associated decoupling
-(C5–C8), 2 × 6-pin connectors (CN3, CN4).
+**Remove:**
+
+- 2 × DRV8870DDAR (U3, U4), 2 × 200 mΩ (R3, R4), decoupling C5–C8, 2 × 6-pin connectors
+  (CN3, CN4) — the 4WD→2WD cut
+- **SSD1306 OLED (OLED1)** — purpose gone with BNO055 calibration, invisible in service, and a
+  `setup()` hard-hang risk (§9)
+- **BNO055** — superseded by BNO086 (§2.5)
+- **CP2102** — if an MCU with native USB is chosen (§2.3). Deletes a recorded wheel-spin failure mode
 
 **Add:**
 
 | Item | Qty | Note |
 |---|---|---|
+| **BNO086 IMU** | 1 | **§2.5.** SPI preferred; bring out INT + RST. Place AWAY from motors/power stage |
+| **INA226** (or shunt + amp) | 1 | **§5.** Pack current — answers the "flat on the dock" question, enables real SoC |
+| **Current-sense amplifier** | 2 | **§4.** One per DRV8870 ISEN — turns stall detection from a heuristic into a measurement |
 | TCA9548A / PCA9548A, TSSOP-24 | 1 | **TI or NXP part — reject PW548A clones** |
-| 4-pin JST connectors (ToF) | 8 | one per mux channel |
+| 4-pin JST connectors (ToF) | 8 | one per mux channel. **Confirm pinout against the chosen ToF — VL53L5CX is under evaluation (§9)** |
+| Keyed I²C bench header | 1 | doubles as the temporary-OLED port (§9) |
 | 3-pin connectors (prox) | 2 | 12 V, keyed |
 | BAT54S clamp diodes | 3 | 2 × prox, 1 × battery ADC |
 | 2N7002 / BSS138 | 1 | IR emitter driver |
