@@ -603,6 +603,113 @@ Not optional for a first bare-module design:
 - **Espressif Hardware Design Guidelines (ESP32-S3)** — contains a **reference schematic** that
   covers Groups 1–3 exactly. Copy it rather than deriving it
 
+### 3.3 Complete interconnect — every net, both ends
+
+Generated 2026-08-19. **This is the schematic, in table form.** §3.1 lists which GPIO carries which
+signal; this lists what is at the far end of each one, plus the sections that never touch the MCU.
+
+Connector/part references used below: `CN1/CN2` motor+encoder, `J-PROX-L/R` prox, `J-TOF0..7` ToF,
+`J-CONSOLE` UART0, `DRV1/DRV2` DRV8870, `U-AMP1/2` current-sense op-amp, `Q1` IR MOSFET,
+`R-SENSE1/2` 200 mΩ.
+
+#### DRV8870 ×2 — motor drivers
+
+| Pin | DRV1 (Motor 1) | DRV2 (Motor 2) |
+|---|---|---|
+| IN1 | GPIO38 M1_DIR | GPIO42 M2_DIR |
+| IN2 | GPIO21 M1_PWM | GPIO41 M2_PWM |
+| VREF | 3V3 | 3V3 |
+| VM | **12 V** (BUCK#1) | 12 V |
+| GND / PAD | GND plane + thermal vias | GND plane |
+| OUT1 / OUT2 | CN1 pin 1 / pin 2 | CN2 pin 1 / pin 2 |
+| ISEN | R-SENSE1 200 mΩ → GND, **and** → U-AMP1 IN+ | R-SENSE2 → GND, → U-AMP2 IN+ |
+
+100 nF + 10 µF at each VM. `I_TRIP = VREF/(10·R_ISEN) = 1.65 A` per channel.
+
+#### CN1 / CN2 — motor + encoder (6-pin DB128V-5.08)
+
+| Pin | Signal | CN1 | CN2 |
+|---|---|---|---|
+| 1 | M+ | DRV1 OUT1 | DRV2 OUT1 |
+| 2 | M− | DRV1 OUT2 | DRV2 OUT2 |
+| 3 | +3V3 | encoder supply | encoder supply |
+| 4 | GND | GND plane | GND plane |
+| 5 | ENC_A | GPIO39 | GPIO47 |
+| 6 | ENC_B | GPIO40 | GPIO5 |
+
+#### BNO086 — SPI
+
+| Pin | To | Resistor |
+|---|---|---|
+| VIN / GND | 3V3 / GND (100 nF at VIN) | — |
+| SCL/SCK | GPIO12 | — |
+| SDA/SDI | GPIO11 | — |
+| SDO/DI | GPIO13 | — |
+| CS | GPIO10 | 10k PU → 3V3 |
+| INT | GPIO14 | — |
+| RST | GPIO15 | 10k PU → 3V3 |
+| PS0, PS1 | **both → 3V3** (selects SPI) | — |
+
+⚠ **Verify PS0/PS1 against the BNO08x datasheet.** Protocol select is PS1:PS0; wrong values land in
+UART-RVC. **Placement: away from the drivers, buck inductor and pack traces (§2.5).**
+
+#### TCA9548A — mux and ToF fan-out
+
+| Pin | To | Resistor |
+|---|---|---|
+| VCC / GND | 3V3 / GND (100 nF) | — |
+| SDA / SCL | GPIO16 / GPIO17 | 2k2 PU each → 3V3 |
+| RESET | GPIO18 | 10k PU → 3V3 |
+| A0/A1/A2 | **GND** → `0x70` | — |
+| SD0/SC0 | J-TOF0 — ToF front-LEFT | 4k7 PU each |
+| SD1/SC1 | J-TOF1 — ToF front-CENTRE | 4k7 PU each |
+| SD2/SC2 | J-TOF2 — ToF front-RIGHT | 4k7 PU each |
+| SD3/SC3 | J-TOF3 — ToF rear-LEFT | 4k7 PU each |
+| SD4/SC4 | J-TOF4 — ToF rear-RIGHT | 4k7 PU each |
+| SD5/SC5 | J-TOF5 — ToF side-LEFT | 4k7 PU each |
+| SD6/SC6 | J-TOF6 — ToF side-RIGHT | 4k7 PU each |
+| SD7/SC7 | J-TOF7 — spare | 4k7 PU each |
+
+**14 pull-ups for 7 active channels.** The mux does **not** pass upstream pull-ups through — every
+downstream segment needs its own pair. All ToFs keep address `0x29`; that is the point of the mux.
+
+#### J-TOF0..7 (4-pin JST)
+
+`1 = 3V3 · 2 = GND · 3 = SDn · 4 = SCn`. XSHUT and GPIO1 left unconnected — the module's onboard
+10k holds XSHUT enabled. 7 × ~20 mA ≈ **140 mA** on 3V3.
+
+#### INA226 — pack voltage + current
+
+| Pin | To | Note |
+|---|---|---|
+| VS / GND | 3V3 / GND | |
+| SDA / SCL | GPIO16 / GPIO17 | upstream bus, **not** behind the mux |
+| A0 / A1 | GND → `0x40` | |
+| VIN+ / VIN− | across the shunt | ⚠ shunt position open (§5) |
+| VBUS | pack + | **replaces the divider** |
+| ALERT | NC or GPIO9 (spare) | optional hardware over-current trip |
+
+#### J-PROX-L / J-PROX-R (3-pin, keyed)
+
+`1 = +12 V · 2 = OUT · 3 = GND`. OUT → **10k series** → GPIO6/GPIO7. At the GPIO node:
+**4k7 PU → 3V3**, **BAT54S** to 3V3/GND, **100 nF** to GND. This network is what keeps 12 V off a
+3.3 V pin (§6).
+
+#### IR charge-enable emitter (§7)
+
+`GPIO8 → 100 Ω → Q1 gate` · `Q1 gate → 10k → GND` (holds beacon OFF at boot) · `Q1 source → GND` ·
+`Q1 drain → TSAL6400 cathode` · `TSAL6400 anode → 33 Ω → 5 V`. ≈110 mA peak vs ~9 mA today.
+
+#### U-AMP1 / U-AMP2 — motor current sense (one dual op-amp, e.g. MCP6002)
+
+`IN+` ← DRV ISEN node · `IN−` ← Rg **1k** to GND with Rf **8k2** to OUT (gain ≈ **9.2**) ·
+`OUT` → **1k** → GPIO1/GPIO2 with **1 µF** to GND · supply 3V3/GND.
+
+Full-scale: 1.65 A × 200 mΩ = 0.33 V × 9.2 = **3.04 V**, near ADC full scale. The 1k+1µF gives
+fc ≈ 159 Hz — averages the 8 kHz PWM chopping while still responding in ~1 ms for stall detection.
+
+---
+
 ---
 
 ## 4. Motor drive — 2 channels
