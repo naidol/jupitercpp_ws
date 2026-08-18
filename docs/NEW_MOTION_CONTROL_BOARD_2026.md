@@ -337,7 +337,7 @@ exact module variant before drawing** — pin availability differs between PSRAM
 |---|---|---|
 | M1_ISENSE | **1** | ADC1_CH0 — motor current (§4) |
 | M2_ISENSE | **2** | ADC1_CH1 |
-| *spare ADC* | **4, 5** | thermistor / future |
+| *spare ADC* | **4** | thermistor / future |
 
 **Motor drive + encoders**
 
@@ -350,7 +350,7 @@ exact module variant before drawing** — pin availability differs between PSRAM
 | M2_PWM | **41** | LEDC. ⚠ 10 k pull-down |
 | M2_DIR | **42** | ⚠ 10 k pull-down |
 | M2_ENC_A | **47** | PCNT unit 1 |
-| M2_ENC_B | **48** | |
+| M2_ENC_B | **5** | ⚠ moved off GPIO48 — see below |
 
 **BNO086 — SPI (FSPI IO_MUX pins)**
 
@@ -378,7 +378,13 @@ exact module variant before drawing** — pin availability differs between PSRAM
 | PROX_LEFT | **6** | via protection (§6) |
 | PROX_RIGHT | **7** | |
 | IR_EMIT | **8** | LEDC 38 kHz → MOSFET (§7) |
-| STATUS_LED | **9** | |
+| STATUS_LED | **48** | Uses the DevKit's **onboard RGB LED**. GPIO9 now free |
+
+⚠ **GPIO48 carries the onboard RGB LED on most ESP32-S3-DevKitC-1 revisions.** An encoder signal
+sharing that net would drive the WS2812's data input — harmless to the LED, but an unnecessary
+capacitive load on an odometry signal. `M2_ENC_B` therefore moves to **GPIO5**, and GPIO48 becomes
+the status LED, which the DevKit already provides. **GPIO9 is now spare.** Verify the LED pin
+against your specific DevKit revision — some use GPIO38.
 
 **23 pins used.** Deliberately untouched: GPIO0/3/45/46 (strapping), 19/20 (native USB),
 26–32 (SPI flash), 43/44 (UART0 — keep as a fallback console header). GPIO33–37 are spare **only
@@ -400,16 +406,53 @@ mattering. Voltage and current both arrive over I²C, pre-calibrated.
 3. **Bring out UART0 (43/44)** as a header even though micro-ROS runs over USB — fallback console.
 4. **MUX_RST on a GPIO**, so firmware can recover a wedged I²C bus without a power cycle.
 
-### 3.2 Module support circuitry — everything the DevKit was doing for you
+### 3.2 MCU mounting — DECIDED: socketed DevKit
 
-⚠ **ver3_1 socketed a DevKit, so the board never provided any of this.** A DevKit is a WROOM-1
-module *plus* USB, an LDO, reset/boot circuitry and buttons on a breakout. Solder the bare module
-down and **your board becomes the carrier**. This is the complete list of what must be added.
+**DECISION 2026-08-19: socket an ESP32-S3-DevKitC-1 into female headers**, as ver3_1 does with its
+ESP32 DevKit. A bare WROOM-1 was considered and the full parts list is retained below, but the
+socket is the chosen path.
 
-**DECISION 2026-08-19: going bare**, deliberately, for production-PCB experience. The socketed
-alternative remains valid — an ESP32-S3-DevKitC-1 drops into headers exactly like the current
-ESP32 DevKit, and every wiring win in this document survives either way. Nothing below is needed
-if that path is taken later.
+**Nothing is lost that matters:**
+
+- Every wiring win in this document is unaffected — battery divider, pull-downs, onboard mux, ToF
+  connectors, current sensing, three-rail power. None of it cares how the MCU is mounted.
+- **USB-Serial-JTAG debugging still works.** The DevKitC-1 has **two USB-C ports** — native USB and
+  the UART bridge. Use the native one and you get the §2.3 debug channel that micro-ROS does not own.
+- The MCU stays **field-replaceable in seconds**, which matters on a robot that lives in the house.
+
+**What is given up:** the bridge chip stays on the DevKit, so the ver3_1 *"unpowered bridge holds EN
+→ floating motor inputs → wheel spin"* mechanism is not structurally deleted. **The §8 motor-drive
+pull-downs remain the real fix and are mandatory.**
+
+#### What the board must provide for a socketed DevKit
+
+Four things. That is the entire list.
+
+| Item | Detail |
+|---|---|
+| **2 × female header** | ESP32-S3-DevKitC-1 is **2 × 22**. Use **machined-pin sockets**, not stamped — this board vibrates and drives into a dock |
+| **5 V** to the DevKit's 5V pin | Its onboard LDO derives the module's 3.3 V, exactly as ver3_1 does via J1 |
+| **GND** | |
+| **Board 3V3 rail** for IMU, mux, ToFs | From the SSP1117 (§11). ⚠ Do **not** draw sensor current from the DevKit's own 3V3 pin — that LDO is sized for the module |
+
+No USB connector, no ESD diodes, no EN RC, no boot/reset buttons, no CC resistors. The DevKit has
+all of it.
+
+#### ⚠ Check before finalising the footprint
+
+- **Header pitch and row spacing** against the exact DevKit you buy — clone board outlines vary.
+- **GPIO48 / onboard RGB LED** (§3.1) — verify which pin drives it on your revision.
+- **Mechanical clearance** for the two USB-C connectors; leave them accessible once mounted.
+- **GPIO33–37** are only usable on non-octal-PSRAM DevKits. The §3.1 map avoids them, so an
+  **N16R8 DevKit is fine** — its PSRAM simply goes unused.
+
+---
+
+### 3.2b Bare-module parts list — NOT the chosen path, retained for reference
+
+Everything below is required **only** if the socket decision is reversed. It is kept because it is
+the harder path to reconstruct later, and because a future revision may take it once the analogue
+side and the mux are proven.
 
 #### Group 1 — Module essentials (4 parts)
 
@@ -1000,15 +1043,8 @@ Add:
 | TCA9548A / PCA9548A, TSSOP-24 | 1 | **TI or NXP part — reject PW548A clones** |
 | 4-pin JST connectors (ToF) | 8 | one per mux channel. **Confirm pinout against the chosen ToF — VL53L5CX is under evaluation (§9)** |
 | Keyed I²C bench header | 1 | doubles as the temporary-OLED port (§9) |
-| **ESP32-S3-WROOM-1-N16** module | 1 | §2. Bare module, soldered. **N16 not N16R8** — octal PSRAM eats GPIO33–37 for RAM already at 22% |
-| 100 nF + 22 µF (module decoupling) | 1 ea | §3.2 Group 1 — 100 nF AT the 3V3 pin |
-| 10 kΩ + 1 µF (EN RC reset) | 1 ea | §3.2 Group 1 |
-| 10 kΩ (GPIO0 pull-up) | 1 | §3.2 Group 2 |
-| Tactile switches (EN, BOOT) | 2 | §3.2 Group 2 |
-| **USB-C receptacle**, 16-pin SMD | 1 | §3.2 Group 3 — TYPE-C-31-M-12 class, with mounting lugs |
-| **5.1 kΩ (CC1, CC2 → GND)** | 2 | §3.2 Group 3 — ⚠ **omit these and USB never enumerates** |
-| **USBLC6-2SC6** (USB ESD) | 1 | §3.2 Group 3 |
-| Load switch / P-FET ideal diode | 0–1 | §3.2 Group 4 — only if you want to flash with the pack off |
+| **ESP32-S3-DevKitC-1** | 1 | §3.2. Socketed. Any flash size; **N16R8 is fine** — the §3.1 map avoids GPIO33–37, so its PSRAM simply goes unused |
+| **Female headers, 2 × 22, machined-pin** | 2 | §3.2 — machined not stamped; this board vibrates |
 | 3-pin connectors (prox) | 2 | 12 V, keyed |
 | BAT54S clamp diodes | 3 | 2 × prox, 1 × battery ADC |
 | 2N7002 / BSS138 | 1 | IR emitter driver |
