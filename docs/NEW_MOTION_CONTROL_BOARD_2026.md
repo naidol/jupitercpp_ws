@@ -117,8 +117,13 @@ it to the RP2040, not to an ESP32. Checked against this firmware, those advantag
 | Eliminates custom serial parsers | There are none. micro-ROS has been the transport since the start |
 | Native USB-CDC, no UART bridge | Real win over the CP2102 — but **ESP32-S3 has native USB too** |
 
-**What survives as a genuine RP2350 advantage over ESP32-S3: PIO encoder decoding. That is the
-whole list.** The honest trade is hardware quadrature decoding, bought with a firmware rewrite and
+**And even PIO may not be unique.** ⚠ *Correction, 2026-08-19:* an earlier draft of this section
+claimed PIO encoder decoding was the sole surviving RP2350 advantage. The **ESP32-S3 has the PCNT
+peripheral** — a hardware pulse counter with quadrature support, 4 units, no CPU per edge. Verify
+against the ESP-IDF PCNT documentation, but if it does what it appears to, the last substantive
+argument for RP2350 disappears and the S3 case becomes clear-cut.
+
+**Net:** RP2350 buys little the S3 does not already provide, at the cost of a firmware rewrite and
 an unproven micro-ROS port.
 
 ### 2.5 IMU — DECIDED: BNO086, magnetometer fitted but not trusted by default
@@ -186,18 +191,54 @@ Not "magnetometer on or off":
 Ties into [[project_operational_modes]]: "outdoor mode" becomes a profile that enables the 9-axis
 report and permits the EKF to trust absolute yaw.
 
-#### ⚠ Layout constraint — because the magnetometer WILL be used
+#### IMU placement — on-board, with an escape hatch
 
-Since the magnetometer is not merely decorative, **placement matters**:
+**What calibration can and cannot absorb decides this.**
 
-- Put the IMU at the **opposite end of the board** from the motor drivers and the power stage
-- Keep high-current motor and pack traces well clear of it
-- Preferably footprint it on a **small daughterboard on a ribbon**, so it can be mounted higher on
-  the chassis and away from the drive train entirely
+- **Static** distortion fixed to the robot — the drive motors' permanent magnets, chassis steel,
+  the battery's steel cans — is **calibratable**. That is precisely what hard/soft-iron calibration
+  does, and what the BNO086 handles in the background.
+- **Dynamic** distortion — field that varies with **motor current** — is **not** calibratable,
+  because it changes with load from moment to moment.
 
-Note this only helps with *static* robot-fixed distortion. A motor drawing amps produces a
-**dynamic** field that no calibration tracks — separation is the only mitigation, and it is only
-cheap to arrange while the board is being drawn.
+So the thing to get away from is **current-carrying conductors**, not magnets.
+
+**Rough magnitude.** For a straight conductor, `B ≈ 2×10⁻⁷ · I / r` tesla:
+
+| Current | 30 mm | 100 mm |
+|---|---|---|
+| 3.3 A (both motors at the ISEN limit) | ~22 µT | ~6.6 µT |
+
+Against a horizontal geomagnetic component that in **southern Africa is comparatively weak** (steep
+dip angle means less of the field lies in the horizontal plane used for heading), those are not
+small numbers. Check local values rather than assuming a mid-northern-latitude figure.
+
+**But return-path cancellation dominates distance.** Route each motor's `+` and `−` as a **tight
+pair** and the far field collapses far faster than 1/r. Good layout beats separation, and is free.
+
+**The decisive point: the largest disturbers are probably OFF the board anyway** — the drive
+motors themselves and the battery pack, both on the chassis. Moving the IMU 60 mm across the PCB
+does not escape those. On-board placement is therefore unlikely to be the deciding factor.
+
+**Recommendation: fit it on the board**, which also serves the project's stated aim of *reducing*
+chassis wiring. Place it:
+
+- **Diagonally opposite** the buck inductor, the DRV8870s and the pack input — the inductor is a
+  ferrite core carrying DC bias and is a worse offender than the motor traces
+- With **no high-current ground return** flowing beneath it
+- Clear of ferrous parts — inductors, steel standoffs, some connector shells
+- Ideally near the **drive-axle centreline**, which keeps rotational (centripetal) artefacts out of
+  the accelerometer. Minor at this robot's speeds — ω²r is ~0.05 m/s² at 0.5 rad/s and 0.2 m,
+  against 9.81 — but free if the board sits there anyway
+
+**Escape hatch — take it.** Also footprint a **6-pin connector** carrying the same SPI + INT + RST +
+3V3 + GND, so the IMU can be relocated to a daughterboard on a ribbon if measurement says it must.
+Populate one or the other. Cost: one connector and a few cm². That way the placement decision does
+not have to be right first time.
+
+**And you can measure it rather than guess.** The BNO086 reports **magnetic field magnitude and a
+per-report accuracy status**. Drive the motors through their current range and watch both. That
+settles on-board-versus-ribbon definitively, on the actual robot, in an afternoon.
 
 #### Practicalities
 
@@ -282,6 +323,82 @@ nothing. Their pins are the reuse pool.
 
 **GPIO 12, 14, 16, 17, 27** — five pins, plus whatever the ToF fan-out doesn't consume.
 Ample headroom. GPIO 12 should be spent last, or given a pull-down (§8).
+
+---
+
+### 3.1 PROPOSED pin map — ESP32-S3 (2 drivers, BNO086, no OLED)
+
+Assumes **ESP32-S3-WROOM-1**, native USB, WiFi enabled. **Verify against the datasheet for the
+exact module variant before drawing** — pin availability differs between PSRAM options.
+
+**Analog — ADC1 only (GPIO1–10). ADC2 is unusable while WiFi is active.**
+
+| Signal | GPIO | Note |
+|---|---|---|
+| M1_ISENSE | **1** | ADC1_CH0 — motor current (§4) |
+| M2_ISENSE | **2** | ADC1_CH1 |
+| *spare ADC* | **4, 5** | thermistor / future |
+
+**Motor drive + encoders**
+
+| Signal | GPIO | Note |
+|---|---|---|
+| M1_PWM | **21** | LEDC. ⚠ 10 k pull-down |
+| M1_DIR | **38** | ⚠ 10 k pull-down |
+| M1_ENC_A | **39** | PCNT unit 0 |
+| M1_ENC_B | **40** | |
+| M2_PWM | **41** | LEDC. ⚠ 10 k pull-down |
+| M2_DIR | **42** | ⚠ 10 k pull-down |
+| M2_ENC_A | **47** | PCNT unit 1 |
+| M2_ENC_B | **48** | |
+
+**BNO086 — SPI (FSPI IO_MUX pins)**
+
+| Signal | GPIO |
+|---|---|
+| IMU_CS | **10** |
+| IMU_MOSI | **11** |
+| IMU_SCLK | **12** |
+| IMU_MISO | **13** |
+| IMU_INT | **14** |
+| IMU_RST | **15** |
+
+**I²C — mux, ToFs, INA226**
+
+| Signal | GPIO |
+|---|---|
+| SDA | **16** |
+| SCL | **17** |
+| MUX_RST | **18** |
+
+**Dock + status**
+
+| Signal | GPIO | Note |
+|---|---|---|
+| PROX_LEFT | **6** | via protection (§6) |
+| PROX_RIGHT | **7** | |
+| IR_EMIT | **8** | LEDC 38 kHz → MOSFET (§7) |
+| STATUS_LED | **9** | |
+
+**23 pins used.** Deliberately untouched: GPIO0/3/45/46 (strapping), 19/20 (native USB),
+26–32 (SPI flash), 43/44 (UART0 — keep as a fallback console header). GPIO33–37 are spare **only
+on non-octal-PSRAM modules** (they are consumed on N8R8/N16R8) — do not design them in until the
+variant is fixed.
+
+#### ▶ The INA226 deletes the battery divider
+
+It measures **bus voltage as well as current**, to 36 V — comfortably covering a 16.8 V pack. That
+removes the 100 k/20 k divider, its filter cap, one ADC channel, the ESP32 ADC's non-linearity and
+`esp_adc_cal` — **and retires §10.2 entirely**, since the "100 k/20 k or 100 k/22 k?" question stops
+mattering. Voltage and current both arrive over I²C, pre-calibrated.
+
+#### Rules that travel with this pin map
+
+1. **10 k pull-downs on all four motor drive pins.** Non-negotiable — a floating-input cold-boot
+   wheel spin is on record. Pin numbers change; the physics does not.
+2. **No analog outside GPIO1–10.** ADC2 dies whenever WiFi is up.
+3. **Bring out UART0 (43/44)** as a header even though micro-ROS runs over USB — fallback console.
+4. **MUX_RST on a GPIO**, so firmware can recover a wedged I²C bus without a power cycle.
 
 ---
 
