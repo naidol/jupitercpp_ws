@@ -20,7 +20,10 @@ MCU-independent unless explicitly marked.
 > 1. ~~What feeds DRV8870 `VM`?~~ **RESOLVED** — a regulated **12 V** from an external
 >    16.8 V → 12 V buck. That buck moves **onto** the new board (§11). See §10.1 for the firmware
 >    bug this exposes.
-> 2. What are the two real resistor values in the battery divider — 100 k/20 k or 100 k/22 k?
+> 2. ~~Battery divider resistor values?~~ **RETIRED** — the divider is deleted; the INA226
+>    supplies bus voltage over I²C (§5). Open in its place: **where does the INA226 shunt go**
+>    — motion board (its own draw) or the pack main line (total, and the only thing that
+>    answers the flat-on-dock question)?
 > 3. Three GPIOs are defined twice in firmware (13, 15, 4). Confirm which function is physically wired.
 
 ---
@@ -573,47 +576,49 @@ docking failures diagnosable in one run rather than three.
 
 ---
 
-## 5. Battery monitoring
+## 5. Battery monitoring — DECIDED: INA226, no divider
 
-Currently a flying divider. Make it a designed block.
+**DECISION 2026-08-19: the resistive divider is DELETED from the new board.** An **INA226**
+provides both bus voltage and current over I²C, pre-calibrated.
 
-```
-   PACK+ (16.8 V max)
-      |
-     R1  100 k
-      |
-      +----+----> GPIO34  (ADC1_CH6)
-      |    |
-     R2   C  100 nF
-      |    |
-     GND  GND
-```
+#### What that removes
 
-- Firmware constant: `BATTERY_V_DIV = 0.16510` — **calibrated against a multimeter**, not nominal.
-  The comment says "nominal 20/120", i.e. R1 = 100 k, R2 = 20 k → 0.1667. See §10.2.
-- Add the **100 nF** to ground at the ADC node. The ESP32 SAR ADC wants a low-impedance source and
-  a 100 k/20 k divider is nowhere near it; this is likely a real contributor to ADC noise today.
-- Consider a **BAT54S clamp** to 3.3 V/GND at the pin. Cheap insurance on a node tied to the pack.
-- GPIO34 is **input-only** — no internal pull-up/down exists, which is exactly why it's a good ADC pin.
-- Full scale check: 16.8 V × 0.1667 = **2.80 V**, inside the 11 dB attenuation range (~3.1 V). Good,
-  with headroom. Do not raise the divider ratio.
+| Gone | Why |
+|---|---|
+| 100 k/20 k divider + filter cap | INA226 measures bus voltage directly, to 36 V |
+| One ADC channel (was GPIO34) | freed |
+| `esp_adc_cal` path | the value arrives calibrated over I²C |
+| `BATTERY_V_DIV = 0.16510` | the hand-fitted fudge factor disappears |
+| **§10.2 entirely** | "100 k/20 k or 100 k/22 k?" stops mattering — see that section |
 
-### ▶ ADD: pack CURRENT sensing (INA226 or shunt + amplifier)
+#### What it adds beyond voltage
 
-Voltage alone is why `power_supply_status` is **hardcoded** — the firmware cannot tell charging
-from discharging, and today reports "discharging" while the pack climbs.
+- **True charge/discharge current and direction** → an honest `power_supply_status`, which is
+  currently hardcoded because the firmware genuinely cannot tell
+- **Coulomb counting** → real state-of-charge instead of a voltage guess
+- The data to size the docked low-power profile ([[project_operational_modes]])
+- Early warning that a docked robot is **net-discharging**, before it goes flat
 
-More importantly, there is an open parking-lot item to *"measure charge-in vs draw per load"*,
-raised because **the robot drained flat on the dock twice**: charge-in (~75 W dock) was less than
-full-bringup draw, so it net-discharged while apparently charging. That question cannot be answered
-without current measurement, and it will recur every time the load profile changes.
+#### ⚠ OPEN: where does the shunt go?
 
-Fitting an **INA226** (I²C, high-side, bidirectional) on the pack gives:
+This decides whether the INA226 answers the question it was added for.
 
-- true charge/discharge current and direction → an honest `power_supply_status`
-- coulomb counting → real state-of-charge instead of a voltage guess
-- the data to size the docked "charging companion" low-power profile properly
-- early warning that a docked robot is net-discharging, before it goes flat
+| Shunt position | Measures | Answers "is it net-charging?" |
+|---|---|---|
+| **On the motion board** | that board's draw only (motors + sensors) | ❌ — Thor's 40–60 W is drawn elsewhere |
+| **In the pack's main line** | **total pack current** | ✅ |
+
+The parking-lot item *"measure charge-in vs draw per load"* exists because **the robot drained flat
+on the dock twice** — charge-in (~75 W) was less than full-bringup draw, so it net-discharged while
+apparently charging. Only total pack current answers that.
+
+The INA226 need not sit at the shunt: it takes VIN+/VIN− across the shunt plus a bus-voltage sense,
+so **2–3 thin sense wires** run from the pack distribution point to the board. That is a small
+addition against the reduce-wiring goal, and worth it.
+
+**Decide before layout.** Sizing note: total pack current is roughly Thor (~3.5 A at 16.8 V) plus
+motors (3.3 A ISEN-limited) plus the rest — size the shunt and its power rating for ~8–10 A, not
+for the motion board alone.
 
 ---
 
@@ -839,7 +844,16 @@ The mechanism is only correct for an unregulated, pack-fed VM. Note this will sh
 duty of the `dock_aligner_v3` tune — **revalidate docking after the change**, it is not a
 transparent edit.
 
-### 10.2 Battery divider resistor values
+### 10.2 ~~Battery divider resistor values~~ — RETIRED 2026-08-19
+
+**No longer applicable.** The divider is deleted from the new board; the INA226 supplies bus
+voltage over I²C (§5). Retained only as a record of why the old `BATTERY_V_DIV = 0.16510` differs
+from nominal — it was fitted against a multimeter to absorb both the resistor tolerance and the
+ESP32 ADC's non-linearity. Both problems vanish with the divider.
+
+<details><summary>original text</summary>
+
+
 
 - `CLAUDE.md` says **R1 = 100 k, R2 = 22 k** → ratio 0.1803
 - `jupiter_config.h` says *"nominal 20/120"* → **R1 = 100 k, R2 = 20 k** → ratio 0.1667
@@ -847,6 +861,8 @@ transparent edit.
 
 0.16510 is far closer to the 20 k figure. **Read the actual resistors before drawing the block.**
 Getting this wrong shifts every battery reading and the `BATTERY_FULL_STOP = 16.70 V` charge cutoff.
+
+</details>
 
 ### 10.3 Triple-defined GPIOs
 
@@ -1031,14 +1047,15 @@ Add:
 - **SSD1306 OLED (OLED1)** — purpose gone with BNO055 calibration, invisible in service, and a
   `setup()` hard-hang risk (§9)
 - **BNO055** — superseded by BNO086 (§2.5)
-- **CP2102** — if an MCU with native USB is chosen (§2.3). Deletes a recorded wheel-spin failure mode
+- **CP2102** — not on the board either way; the DevKit carries its own (§3.2)
+- **Battery divider (R1/R2 + filter cap)** — replaced by the INA226 (§5)
 
 **Add:**
 
 | Item | Qty | Note |
 |---|---|---|
 | **BNO086 IMU** | 1 | **§2.5.** SPI preferred; bring out INT + RST. Place AWAY from motors/power stage |
-| **INA226** (or shunt + amp) | 1 | **§5.** Pack current — answers the "flat on the dock" question, enables real SoC |
+| **INA226 + shunt** | 1 | **§5.** Bus voltage AND current — replaces the divider entirely. ⚠ Shunt position still open: motion board vs pack main line |
 | **Current-sense amplifier** | 2 | **§4.** One per DRV8870 ISEN — turns stall detection from a heuristic into a measurement |
 | TCA9548A / PCA9548A, TSSOP-24 | 1 | **TI or NXP part — reject PW548A clones** |
 | 4-pin JST connectors (ToF) | 8 | one per mux channel. **Confirm pinout against the chosen ToF — VL53L5CX is under evaluation (§9)** |
