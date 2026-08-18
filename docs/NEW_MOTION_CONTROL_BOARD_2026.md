@@ -778,19 +778,48 @@ Keep the ToFs on **3.3 V**. Measured: 22.9 MCPS of return signal on the 3.3 V ra
 healthy VCSEL. An earlier theory that the GY-530's onboard LDO was browning out at 3.3 V was
 tested and is **wrong**.
 
-### ⚠ Reconsider the ToF part — VL53L5CX multizone
+### ToF part — DECIDED: stay with VL53L0X
 
-The near-field blind wedge measured on 2026-08-14 is a **single-zone geometry limitation**, not a
-mounting error: one ~25° cone means tilting up to reject the floor necessarily blinds you to low
-objects nearby. At 85 mm and 8° up-tilt, a shoe-box-height object at 389 mm is invisible.
+**DECISION 2026-08-19: use the 8 × VL53L0X already in hand.** VL53L5CX multizone was raised and is
+**not warranted** — the measured blind wedge is fixed by mount geometry, at no cost, in a reprint
+that has to happen anyway.
 
-A **VL53L5CX** (4×4 or 8×8 zones, ~63° FoV) resolves floor and obstacle in **different zones
-simultaneously**, so the trade disappears — no tilt compromise, and far fewer sensors needed for
-the same coverage. It addresses the measured defect rather than working around it.
+#### The geometry fix
 
-Costs to check before committing: larger I²C payload (64 zones), more host processing, higher unit
-price, and different footprint/optics. Worth evaluating against VL53L0X while the board is open,
-since connector choice and bus budget depend on it.
+An object of height `h` is invisible closer than `(H − h) / tan(12.5° − tilt)`:
+
+| Mount | 30 mm object | 50 mm object | Floor enters cone |
+|---|---|---|---|
+| **85 mm / 8°** (as built) | blind < **0.70 m** | blind < 0.44 m | 1.08 m |
+| **50 mm / 8°** ◀ **adopt** | blind < **0.25 m** | **always visible** | **0.64 m** |
+| 40 mm / 8° | blind < 0.13 m | always visible | 0.51 m |
+
+**Adopt 50 mm / 8°, `max_range` ≈ 0.60 m.** That gives a usable **0.25–0.60 m reflex band** which
+sees anything 30 mm or taller, with the floor never entering the cone inside it. The current
+85 mm mount is blind to a shoe-box-height object inside 0.70 m — most of the zone the layer exists
+to cover — which is what was measured on 2026-08-14.
+
+This costs nothing: the mounts must be reprinted regardless for the crosstalk fix (black matte,
+aperture ≥6–7 mm, module flush or proud — see the mechanical warning below).
+
+#### What the geometry fix does NOT solve
+
+The ~25° cone is narrow, so a single sensor still misses a chair leg well off its axis. **Coverage
+comes from multiplication, not per-sensor FoV** — that is the point of the 7-sensor ring
+(3 front / 2 rear / 2 side) behind the mux, which costs zero GPIO.
+
+#### Contingency — revisit VL53L5CX only if
+
+- the ring proves genuinely insufficient after the geometry fix, **and**
+- inter-sensor coverage gaps are the demonstrated cause
+
+Its 4×4/8×8 zones and ~63° FoV would resolve floor and obstacle simultaneously, removing the tilt
+trade entirely. But it costs more, needs far more I²C bandwidth and host processing, and adds an
+unproven component to a subsystem that has already cost a full day.
+
+⚠ **Prove what you have first.** Only **one** VL53L0X has ever worked on this robot, and the mux
+never enumerated at all. The 7-sensor ring is entirely unproven. Get the on-PCB mux and two or
+three VL53L0X working before buying any alternative.
 
 ### ⚠ Mechanical warning — this is not a PCB problem but it will waste a day
 
@@ -1058,7 +1087,7 @@ Add:
 | **INA226 + shunt** | 1 | **§5.** Bus voltage AND current — replaces the divider entirely. ⚠ Shunt position still open: motion board vs pack main line |
 | **Current-sense amplifier** | 2 | **§4.** One per DRV8870 ISEN — turns stall detection from a heuristic into a measurement |
 | TCA9548A / PCA9548A, TSSOP-24 | 1 | **TI or NXP part — reject PW548A clones** |
-| 4-pin JST connectors (ToF) | 8 | one per mux channel. **Confirm pinout against the chosen ToF — VL53L5CX is under evaluation (§9)** |
+| 4-pin JST connectors (ToF) | 8 | one per mux channel, for the **VL53L0X already in hand** (§9) |
 | Keyed I²C bench header | 1 | doubles as the temporary-OLED port (§9) |
 | **ESP32-S3-DevKitC-1** | 1 | §3.2. Socketed. Any flash size; **N16R8 is fine** — the §3.1 map avoids GPIO33–37, so its PSRAM simply goes unused |
 | **Female headers, 2 × 22, machined-pin** | 2 | §3.2 — machined not stamped; this board vibrates |
