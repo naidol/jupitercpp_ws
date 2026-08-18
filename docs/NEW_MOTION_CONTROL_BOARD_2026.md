@@ -400,6 +400,38 @@ mattering. Voltage and current both arrive over I²C, pre-calibrated.
 3. **Bring out UART0 (43/44)** as a header even though micro-ROS runs over USB — fallback console.
 4. **MUX_RST on a GPIO**, so firmware can recover a wedged I²C bus without a power cycle.
 
+### 3.2 Module support circuitry — NEW, and easy to forget
+
+⚠ **ver3_1 socketed a DevKit, so the board never provided any of this.** A DevKit is a WROOM-1
+module *plus* USB, an LDO and boot/reset buttons on a breakout. Solder the bare module down and
+**your board becomes the carrier** — it must supply the same things. None of it is currently in
+this document, and all of it is required.
+
+| Item | Detail |
+|---|---|
+| **Power** | 3V3 + GND from the existing rail (§11). **100 nF + 10 µF** decoupling right at the module pins |
+| **EN (reset)** | **10 kΩ pull-up to 3V3 + 1 µF to GND** — the RC power-on reset. Optional pushbutton EN→GND |
+| **BOOT** | GPIO0: 10 kΩ pull-up + pushbutton to GND, for download-mode recovery |
+| **USB-C receptacle** | D+ → **GPIO20**, D− → **GPIO19**, VBUS, GND. **5.1 kΩ from each of CC1/CC2 to GND** — without these the host never enumerates the board as a device |
+| **USB ESD** | USBLC6-2SC6 or equivalent on D+/D− |
+| **Auto-reset transistors** | **NOT required.** USB-Serial-JTAG handles reset and download mode natively — one more thing the CP2102 was there to do (§2.3) |
+
+#### ⚠ Decide the USB power question deliberately
+
+Two supplies can meet here — the pack rail and USB VBUS — and getting it wrong reproduces the
+ver3_1 failure class.
+
+**Do not simply tie VBUS to the 3V3 rail** (back-feed). And do not leave the module *unpowered
+while USB is connected* either: an unpowered chip with a live host on its pins is exactly the
+condition that let the CP2102 hold EN through Thor's cold boot and float the motor inputs.
+
+Recommended: **OR the two sources through a load switch or ideal-diode**, so the module is powered
+whenever *either* the pack rail or USB is present, and neither back-feeds the other. That also
+means the board can be flashed on the bench with the pack disconnected — genuinely useful.
+
+Whatever is chosen, the §8 motor-drive pull-downs remain the last line of defence and are not
+optional.
+
 ---
 
 ## 4. Motor drive — 2 channels
@@ -918,6 +950,12 @@ Add:
 | TCA9548A / PCA9548A, TSSOP-24 | 1 | **TI or NXP part — reject PW548A clones** |
 | 4-pin JST connectors (ToF) | 8 | one per mux channel. **Confirm pinout against the chosen ToF — VL53L5CX is under evaluation (§9)** |
 | Keyed I²C bench header | 1 | doubles as the temporary-OLED port (§9) |
+| **USB-C receptacle** | 1 | **§3.2.** Native USB to GPIO19/20 |
+| **5.1 kΩ (USB-C CC pull-downs)** | 2 | §3.2 — without these the host will not enumerate |
+| **USBLC6-2SC6** (USB ESD) | 1 | §3.2 |
+| **Tactile buttons (EN, BOOT)** | 2 | §3.2 |
+| **10 kΩ / 1 µF (EN RC reset)** | 1 ea | §3.2 |
+| **Load switch / ideal-diode OR** | 1 | §3.2 — pack rail vs USB VBUS, no back-feed |
 | 3-pin connectors (prox) | 2 | 12 V, keyed |
 | BAT54S clamp diodes | 3 | 2 × prox, 1 × battery ADC |
 | 2N7002 / BSS138 | 1 | IR emitter driver |
