@@ -109,7 +109,7 @@
   module flush or proud, NEVER recessed. Full detail: firmware/i2c_scan/src/main.cpp.
 - ⚠️ voltageScale() in firmware compensates motor duty against MEASURED PACK voltage, but VM is
   a regulated 12V rail — the motors never see the pack. Suspected to swing duty ~29% across a
-  discharge for no physical reason. See docs/NEW_ESP32_MOTION_CONTROL_BOARD_2026.md §9.1.
+  discharge for no physical reason. See docs/NEW_MOTION_CONTROL_BOARD_2026.md §10.1.
 - Thor's git had no github.com host key after the JetPack 7.2 rebuild, so it silently could not
   fetch. Fixed 2026-08-13, but Thor's working tree still carries uncommitted drift from that gap.
 

@@ -1,19 +1,24 @@
-# New ESP32 Motion Control Board — 2026
+# New Motion Control Board — 2026
 
 **Purpose:** design brief for the successor to `Jupiter ESP32 Drv8870 12vDC ver3_1`
 (EasyEDA, JLCPCB-002, drawn 2024-06-29). Captures every change made to the robot since that
 board was fabricated, so the schematic can be redrawn and sent to JLCPCB in one pass.
 
 **Status:** specification only. Nothing here has been drawn yet.
+**MCU is NOT fixed.** ESP32-WROOM-32 is what ver3_1 and the current firmware use, but the
+board is specified so the MCU can change — see §3. Everything in §5–§12 is
+MCU-independent unless explicitly marked.
 **Source of truth for pin assignments:** `firmware/esp32/include/jupiter_config.h`.
 **Predecessor schematic:** `~/Documents/Jupiter_ESP32_Board_easyeda.pdf`.
 
 > ### ⚠ Before drawing anything
 > Contradictions between the old schematic, the firmware and the docs. Cheap to settle with a
-> multimeter, expensive to get wrong on a fabricated board. Detailed in §9.
+> multimeter, expensive to get wrong on a fabricated board. Detailed in §10.
 >
+> 0. **MCU and IMU are NOT fixed** — ESP32-WROOM-32 / ESP32-S3 / RP2350, and BNO055 vs BNO085.
+>    See §2. Everything else in this document is MCU-independent and can proceed regardless.
 > 1. ~~What feeds DRV8870 `VM`?~~ **RESOLVED** — a regulated **12 V** from an external
->    16.8 V → 12 V buck. That buck moves **onto** the new board (§10). See §9.1 for the firmware
+>    16.8 V → 12 V buck. That buck moves **onto** the new board (§11). See §10.1 for the firmware
 >    bug this exposes.
 > 2. What are the two real resistor values in the battery divider — 100 k/20 k or 100 k/22 k?
 > 3. Three GPIOs are defined twice in firmware (13, 15, 4). Confirm which function is physically wired.
@@ -27,17 +32,118 @@ board was fabricated, so the schematic can be redrawn and sent to JLCPCB in one 
 | 1 | **4WD → 2WD.** Two driven wheels + one rear caster (180 mm behind the drive axle) | Two DRV8870 channels are now dead weight |
 | 2 | **Battery monitoring added.** Resistive divider → GPIO34 | Currently off-board / flying. Needs to be a designed circuit |
 | 3 | **Dock proximity sensors added.** 2 × LJ18A3-8-Z/BX inductive, **12 V**, NPN open-collector | 12 V logic arriving at a 3.3 V pin with no protection |
-| 4 | **Dock IR emitter added.** TSAL6400 + 220 Ω on GPIO4, 38 kHz | Driven straight from a GPIO. Under-driven, see §6 |
+| 4 | **Dock IR emitter added.** TSAL6400 + 220 Ω on GPIO4, 38 kHz | Driven straight from a GPIO. Under-driven, see §7 |
 | 5 | **Wheels changed** 65 mm rubber → 100 mm AGV | Firmware constants only, no PCB impact |
-| 6 | **Strapping-pin pull-downs needed** | Not on ver3_1 at all. See §7 — this is the most likely cause of intermittent boot failures |
-| 7 | **I²C expansion:** TCA9548A mux + up to 7 × VL53L0X ToF | New. Currently hand-wired and **not working** — see §8 |
+| 6 | **Strapping-pin pull-downs needed** | Not on ver3_1 at all. See §8 — this is the most likely cause of intermittent boot failures |
+| 7 | **I²C expansion:** TCA9548A mux + up to 7 × VL53L0X ToF | New. Currently hand-wired and **not working** — see §9 |
 | 8 | Position-control mode (`/wheel_move`) added to firmware | Software only, no PCB impact |
 
 ---
 
-## 2. Pin map — current firmware, authoritative
+## 2. MCU and IMU — the open platform decision
+
+Raised 2026-08-19. **Neither is settled.** This section exists so the rest of the document can be
+read as MCU-neutral: the stated objective — *reduce the wiring burden on the chassis* — is
+delivered by the PCB layout, not by the choice of microcontroller.
+
+### 2.1 What is MCU-independent — do it regardless
+
+Everything below stands whichever MCU is fitted. Do not hold these hostage to a platform decision:
+
+- Battery divider as a designed block, not flying wires (§5)
+- Protection on the 12 V open-collector prox inputs (§6)
+- A proper low-side driver for the IR emitter (§7)
+- **TCA9548A mux on the board** with per-channel pull-ups and keyed ToF connectors (§9) — this is
+  the single biggest wiring win, and it retires the hand-wired mux that never enumerated
+- Three-rail power with the external buck brought onboard (§11)
+- Reverse-polarity protection, regen clamp, thermal pours (§11)
+
+### 2.2 MCU candidates
+
+| | ESP32-WROOM-32 (ver3_1) | **ESP32-S3** | RP2350 / Pico 2 |
+|---|---|---|---|
+| micro-ROS | proven, in service | supported, same ecosystem | ⚠ **official Pico port targets RP2040 — RP2350 parity MUST be verified** |
+| Firmware reuse | 100% | ~95% (same LEDC/ADC/FreeRTOS APIs) | **rewrite** |
+| USB | external CP2102 | **native** | native |
+| WiFi | yes | yes | only on Pico 2 **W** |
+| Encoders | GPIO interrupts | GPIO interrupts | **PIO — hardware quadrature, zero CPU** |
+| Era | 2016 | current | current |
+
+### 2.3 The CP2102 argument for native USB
+
+This is not cosmetic, and it is tied to a recorded safety incident. From the parking lot:
+
+> unpowered CP2102 holding EN during Thor's ~30 s cold boot → firmware never runs → both motor
+> inputs float → **continuous spin** until Thor is up
+
+Native USB **deletes that part and that failure mode**. Any MCU with native USB (S3 or RP2350)
+removes it; staying on WROOM-32 means keeping the CP2102 and relying on the §8 pull-downs alone
+to hold the drivers in COAST through the float window.
+
+### 2.4 RP2350 — the honest trade
+
+**The real attraction is PIO.** Hardware quadrature decoding with no missed edges and no CPU cost
+is a structural improvement over GPIO interrupts, and this project has a history of encoder
+defects: the `getRPM` 0.0-return that produced a 2.6× odometry error, and the CPR recalibration.
+
+**The cost is a firmware rewrite, not a port.** LEDC drives motor PWM *and* the 38 kHz IR carrier;
+the dual-core pinning is load-bearing (IR burst timing on core 0, micro-ROS on core 1); the ADC
+path uses `esp_adc_cal`. The 4-state auto-reconnect machine, position-control (`/wheel_move`) mode
+and the prox reflex would all need revalidating from scratch.
+
+**Gate on one question, before any other work:** does micro-ROS support RP2350 to the same standard
+as ESP32? The entire firmware architecture is micro-ROS. If that answer is not solid, the
+evaluation stops there.
+
+### 2.5 IMU — BNO055 vs BNO085
+
+⚠ **The stock comparison does not apply to this robot, because the firmware runs IMUPLUS.**
+
+```cpp
+// imu_bno055.cpp — magnetometer is already OUT of the fusion loop
+bno.setMode(OPERATION_MODE_IMUPLUS);
+```
+
+| Common claim for BNO085 | Against this robot |
+|---|---|
+| Drift 1–2°/min → <0.5°/min | **Not comparable.** Those are 9-DOF figures. IMUPLUS yaw is pure gyro integration; the BNO085's magnetometer-free mode (Game Rotation Vector) drifts for the same physical reason. No magnetometer, no absolute reference — physics, not silicon |
+| Calibration "drops state randomly" | Mag calibration is irrelevant in IMUPLUS, and stored gyro/accel offsets are restored at boot. Already a solved item |
+| I²C clock stretching hangs the bus | A **Broadcom BCM2835 (Raspberry Pi)** defect. ESP32 I²C handles stretching correctly — BNO055 + SSD1306 run at 400 kHz with no reported hangs. RP2350's I²C block also handles it |
+| 100 Hz → 400 Hz report rate | IMU publishes at ~18 Hz. Nowhere near the constraint |
+| Built-in Tare | Genuinely nicer than offset math, but offset restore already works |
+
+**Verdict: the BNO085 is a better part but does not fix a problem this robot has.** The one real
+BNO055 weakness — magnetometer instability — was engineered around in July by switching to
+IMUPLUS. Absolute heading would need a magnetometer, which was deliberately rejected because the
+motors swamp it; a BNO085 in the same chassis eats the same interference.
+
+Blast radius if swapped anyway: **176 lines** (`imu_bno055.h` + `.cpp`), a different library
+(SH-2 / Adafruit BNO08x), and a recalibration. Contained, low-risk, defensible on a respin —
+just do not expect less heading drift.
+
+### 2.6 Recommendation
+
+**Decouple.** Respin the board for the wiring wins now; treat the MCU migration as a separate,
+gated evaluation.
+
+- **ESP32-S3** is the low-risk modernisation: retires the 2016-era part *and* the CP2102, keeps
+  the firmware, toolchain, WiFi and micro-ROS path essentially intact.
+- **RP2350** only after the micro-ROS question is answered, and understanding it is a rewrite.
+- **BNO085** optional — take it as a part upgrade, not as a fix.
+
+Whatever is chosen, footprint the board so the **MCU sits on a module/socket** rather than being
+soldered down, so a future change does not mean another respin.
+
+---
+
+## 3. Pin map — current ESP32 firmware (reference)
 
 From `jupiter_config.h`. **Bold = in active use on the 2WD robot.**
+
+⚠ **This is ESP32-WROOM-32 specific.** It records what the robot runs today and is the
+authority for *functions the board must provide* — 2 × PWM/DIR, 2 × quadrature encoder,
+2 × prox in, 1 × IR out, 1 × ADC, I²C, USB serial. The GPIO numbers themselves only survive if
+the ESP32 is retained (§2).
 
 ### Drive (retained)
 
@@ -61,7 +167,7 @@ nothing. Their pins are the reuse pool.
 |---|---|---|
 | MOTOR3_PWM | 27 | **free** |
 | MOTOR3_DIR | 14 | **free** |
-| MOTOR3_ENC_B | 12 | **free** — ⚠ strapping pin, see §7 |
+| MOTOR3_ENC_B | 12 | **free** — ⚠ strapping pin, see §8 |
 | MOTOR3_ENC_A | 13 | **reused → PROX_LEFT** |
 | MOTOR4_PWM | 17 | **free** |
 | MOTOR4_DIR | 16 | **free** |
@@ -84,11 +190,11 @@ nothing. Their pins are the reuse pool.
 ### Free after the 2WD cut
 
 **GPIO 12, 14, 16, 17, 27** — five pins, plus whatever the ToF fan-out doesn't consume.
-Ample headroom. GPIO 12 should be spent last, or given a pull-down (§7).
+Ample headroom. GPIO 12 should be spent last, or given a pull-down (§8).
 
 ---
 
-## 3. Motor drive — 2 channels
+## 4. Motor drive — 2 channels
 
 Keep the ver3_1 topology, it works. Per channel:
 
@@ -114,7 +220,7 @@ single rear caster. Going back to 4WD would invalidate it.
 
 ---
 
-## 4. Battery monitoring
+## 5. Battery monitoring
 
 Currently a flying divider. Make it a designed block.
 
@@ -131,7 +237,7 @@ Currently a flying divider. Make it a designed block.
 ```
 
 - Firmware constant: `BATTERY_V_DIV = 0.16510` — **calibrated against a multimeter**, not nominal.
-  The comment says "nominal 20/120", i.e. R1 = 100 k, R2 = 20 k → 0.1667. See §9.2.
+  The comment says "nominal 20/120", i.e. R1 = 100 k, R2 = 20 k → 0.1667. See §10.2.
 - Add the **100 nF** to ground at the ADC node. The ESP32 SAR ADC wants a low-impedance source and
   a 100 k/20 k divider is nowhere near it; this is likely a real contributor to ADC noise today.
 - Consider a **BAT54S clamp** to 3.3 V/GND at the pin. Cheap insurance on a node tied to the pack.
@@ -141,7 +247,7 @@ Currently a flying divider. Make it a designed block.
 
 ---
 
-## 5. Dock proximity sensors — needs protection
+## 6. Dock proximity sensors — needs protection
 
 **2 sensors** (not 3): `PROX_LEFT` and `PROX_RIGHT`. Firmware encodes them as a bitmask —
 **bit0 = left, bit1 = right**, so the "seated" state everyone quotes as `contact=3` simply means
@@ -177,7 +283,7 @@ offsets between the sensor supply and the ESP32.
 
 ---
 
-## 6. Dock IR emitter — currently under-driven
+## 7. Dock IR emitter — currently under-driven
 
 **Part:** TSAL6400 + 220 Ω on GPIO4. 38 kHz carrier via LEDC ch 4, burst-gated
 (600 µs on/off × 10, then 40 ms gap ≈ 19 packets/s) to keep the dock's TSOP AGC happy.
@@ -204,7 +310,12 @@ or a wider approach cone, which is exactly what the docking envelope wants.
 
 ---
 
-## 7. Strapping-pin pull-downs — do not skip
+## 8. Strapping-pin pull-downs — do not skip
+
+⚠ **ESP32-specific (§2).** Strapping pins are an ESP32 boot mechanism; RP2350 has a different
+boot scheme and this section would be rewritten for it. The *motor-input* pull-downs at the end
+of this section apply to EVERY MCU — a floating driver input during reset is undefined on any
+part, and on this robot it caused a recorded wheel-spin incident.
 
 This is the item most likely to be silently costing reliability today, and ver3_1 has none of it.
 
@@ -229,7 +340,7 @@ on power-up is a robot that can drive off a bench.
 
 ---
 
-## 8. I²C bus, mux and ToF fan-out
+## 9. I²C bus, mux and ToF fan-out
 
 ### Current bus
 
@@ -271,7 +382,7 @@ module is plugged in.
 ### ToF power budget
 
 7 × VL53L0X at ~20 mA ≈ **140 mA** on 3.3 V, plus IMU, OLED and the mux. That is a material load —
-see §10, it is the main argument for replacing the linear regulators.
+see §11, it is the main argument for replacing the linear regulators.
 
 Keep the ToFs on **3.3 V**. Measured: 22.9 MCPS of return signal on the 3.3 V rail is a perfectly
 healthy VCSEL. An earlier theory that the GY-530's onboard LDO was browning out at 3.3 V was
@@ -297,9 +408,9 @@ offset-calibrated via `ALGO_PART_TO_PART_RANGE_OFFSET_MM`. **Never switch profil
 
 ---
 
-## 9. The three contradictions to resolve first
+## 10. The three contradictions to resolve first
 
-### 9.1 RESOLVED — VM is a regulated 12 V, and `voltageScale()` is compensating for nothing
+### 10.1 RESOLVED — VM is a regulated 12 V, and `voltageScale()` is compensating for nothing
 
 **The board is fed 12 V from an external 16.8 V → 12 V buck.** ver3_1's `+12 V` is accurate.
 The motors are **rated 12 V DC**, so this rail is not optional — it is what keeps them in spec.
@@ -329,7 +440,7 @@ The mechanism is only correct for an unregulated, pack-fed VM. Note this will sh
 duty of the `dock_aligner_v3` tune — **revalidate docking after the change**, it is not a
 transparent edit.
 
-### 9.2 Battery divider resistor values
+### 10.2 Battery divider resistor values
 
 - `CLAUDE.md` says **R1 = 100 k, R2 = 22 k** → ratio 0.1803
 - `jupiter_config.h` says *"nominal 20/120"* → **R1 = 100 k, R2 = 20 k** → ratio 0.1667
@@ -338,7 +449,7 @@ transparent edit.
 0.16510 is far closer to the 20 k figure. **Read the actual resistors before drawing the block.**
 Getting this wrong shifts every battery reading and the `BATTERY_FULL_STOP = 16.70 V` charge cutoff.
 
-### 9.3 Triple-defined GPIOs
+### 10.3 Triple-defined GPIOs
 
 `13`, `15` and `4` are each defined **twice** in `jupiter_config.h` — once as a motor-3/4 encoder,
 once as prox/IR — and the firmware still constructs `motor3_encoder` and `motor4_encoder` on those
@@ -350,7 +461,7 @@ encoder definitions entirely** so the mapping is unambiguous, and clean up the f
 
 ---
 
-## 10. Power supply — bring the external buck onboard
+## 11. Power supply — bring the external buck onboard
 
 **The change:** the board is currently fed 12 V by an **external 16.8 V → 12 V buck** sitting
 elsewhere on the robot. The new board takes the **raw 4S pack** and generates all three rails
@@ -364,7 +475,7 @@ itself. One input, one fuse, one reverse-protection stage, one less box to mount
                                                                             └──► BUCK #2 ──► 5 V (2 A)
                                                                                      │
                                                                                      ├──► ESP32 DevKit VIN
-                                                                                     ├──► IR emitter driver (§6)
+                                                                                     ├──► IR emitter driver (§7)
                                                                                      └──► SSP1117-3.3 ──► 3.3 V
                                                                                               │
                                                                                               └──► IMU, OLED, mux, 7 × ToF
@@ -496,7 +607,7 @@ Add:
 
 ---
 
-## 11. Layout notes
+## 12. Layout notes
 
 - **Keep the ESP32 as a socketed DevKit.** Soldered-down WROOM is neater, but the devkit has been
   reliable, is field-replaceable, and carries a proven USB-serial path at 460800 baud. Not the
@@ -512,7 +623,7 @@ Add:
 
 ---
 
-## 12. Bill of materials — changes from ver3_1
+## 13. Bill of materials — changes from ver3_1
 
 **Remove:** 2 × DRV8870DDAR (U3, U4), 2 × 200 mΩ (R3, R4), associated decoupling
 (C5–C8), 2 × 6-pin connectors (CN3, CN4).
@@ -529,10 +640,10 @@ Add:
 | Buck #1 IC, 12 V @ 5 A sync (TPS54540/54560 class) | 1 | **replaces the external 16.8→12 V buck** |
 | Buck #2 IC, 5 V @ 2 A (MP1584EN / AP63205) | 1 | fed from 12 V; SSP1117-3.3 is RETAINED, re-sourced from 5 V |
 | Inductors, shielded | 2 | one per buck; #1 sat rating ≥ 1.5× peak motor current |
-| Buck passives (caps, FB dividers, BST) | ~16 | see §10 |
+| Buck passives (caps, FB dividers, BST) | ~16 | see §11 |
 | Bulk electrolytic 220–470 µF / 25 V | 1 | 12 V rail, motor regen |
 | TVS / zener clamp ~15 V | 1 | 12 V rail, motor regen |
-| Resistors: 10 k pull-down/up (strapping) | ~8 | §7 |
+| Resistors: 10 k pull-down/up (strapping) | ~8 | §8 |
 | Resistors: 2.2 k (upstream I²C pull-up) | 2 | |
 | Resistors: 4.7 k (per-channel I²C pull-up) | 16 | 2 per active mux channel |
 | 100 nF decoupling | ~6 | mux, ADC node, prox inputs |
@@ -540,11 +651,11 @@ Add:
 
 ---
 
-## 13. Open questions for Logan
+## 14. Open questions for Logan
 
 1. **7 ToFs or 8?** The mux has 8 channels. Are all 7 front-facing, or are some cliff/rear?
    Placement drives connector positions on the board edge.
-2. **Is the 12 V rail still needed at all** if VM turns out to be pack-fed (§9.1)? The prox sensors
+2. **Is the 12 V rail still needed at all** if VM turns out to be pack-fed (§10.1)? The prox sensors
    need 12 V, so probably yes — but it may become a small dedicated supply rather than the main rail.
 3. **Board outline / mounting** — unchanged from ver3_1?
 4. **JLC assembly scope** — full assembly, or hand-solder the connectors? Affects whether the mux
