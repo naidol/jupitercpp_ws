@@ -347,7 +347,7 @@ exact module variant before drawing** — pin availability differs between PSRAM
 | Signal | GPIO | Note |
 |---|---|---|
 | M1_PWM | **21** | LEDC. ⚠ 10 k pull-down |
-| M1_DIR | **38** | ⚠ 10 k pull-down |
+| M1_DIR | **48** | ⚠ 10 k pull-down. **Moved off 38 — that is RGB_LED** |
 | M1_ENC_A | **39** | PCNT unit 0 |
 | M1_ENC_B | **40** | |
 | M2_PWM | **41** | LEDC. ⚠ 10 k pull-down |
@@ -381,13 +381,17 @@ exact module variant before drawing** — pin availability differs between PSRAM
 | PROX_LEFT | **6** | via protection (§6) |
 | PROX_RIGHT | **7** | |
 | IR_EMIT | **8** | LEDC 38 kHz → MOSFET (§7) |
-| STATUS_LED | **48** | Uses the DevKit's **onboard RGB LED**. GPIO9 now free |
+| STATUS_LED | **38** | DevKit's **onboard RGB** — silkscreen `RGB@IO38`. `neopixelWrite()` |
 
-⚠ **GPIO48 carries the onboard RGB LED on most ESP32-S3-DevKitC-1 revisions.** An encoder signal
-sharing that net would drive the WS2812's data input — harmless to the LED, but an unnecessary
-capacitive load on an odometry signal. `M2_ENC_B` therefore moves to **GPIO5**, and GPIO48 becomes
-the status LED, which the DevKit already provides. **GPIO9 is now spare.** Verify the LED pin
-against your specific DevKit revision — some use GPIO38.
+⚠ **CORRECTED 2026-08-19 against the official Espressif DevKitC-1 pinout.** The onboard RGB LED is
+on **GPIO38**, not GPIO48 — the board silkscreen reads `RGB@IO38`. An earlier draft put `M1_DIR`
+there, which would have placed a motor direction line on the LED driver's net.
+
+- `STATUS_LED` → **GPIO38** (onboard RGB; `neopixelWrite()`, not `digitalWrite()`)
+- `M1_DIR` → **GPIO48** (`SPICLK_N` is an alternate function only — free as GPIO)
+- `M2_ENC_B` → **GPIO5**, keeping encoders off any shared net
+
+**GPIO4 and GPIO9 are the spares**, both ADC1-capable — route both to `J-EXP` (§3.3).
 
 **23 pins used.** Deliberately untouched: GPIO0/3/45/46 (strapping), 19/20 (native USB),
 26–32 (SPI flash), 43/44 (UART0 — keep as a fallback console header). GPIO33–37 are spare **only
@@ -406,27 +410,27 @@ mattering. Voltage and current both arrive over I²C, pre-calibrated.
 ```
   LEFT HEADER                          RIGHT HEADER
   ───────────────────────────          ───────────────────────────
-  3V3                                  GND
-  3V3                                  GPIO43  ── UART0 TX (console)
-  RST (EN)                             GPIO44  ── UART0 RX (console)
-  GPIO4    — spare ADC                 GPIO1   M1_ISENSE   ADC1_CH0
-  GPIO5    M2_ENC_B                    GPIO2   M2_ISENSE   ADC1_CH1
-  GPIO6    PROX_LEFT                   GPIO42  M2_DIR      ⚠ pull-down
-  GPIO7    PROX_RIGHT                  GPIO41  M2_PWM      ⚠ pull-down
+  3V3      ── NC                       GND
+  3V3      ── NC                       GPIO43  ── UART0 TX  → J-CONSOLE
+  RST (EN) ── test point               GPIO44  ── UART0 RX  → J-CONSOLE
+  GPIO4    SPARE      → J-EXP          GPIO1   M1_ISENSE   ADC1_0
+  GPIO5    M2_ENC_B                    GPIO2   M2_ISENSE   ADC1_1
+  GPIO6    PROX_LEFT                   GPIO42  M2_DIR      ⚠ 10k PD
+  GPIO7    PROX_RIGHT                  GPIO41  M2_PWM      ⚠ 10k PD
   GPIO15   IMU_RST                     GPIO40  M1_ENC_B
-  GPIO16   I2C_SDA                     GPIO39  M1_ENC_A
-  GPIO17   I2C_SCL                     GPIO38  M1_DIR      ⚠ pull-down
+  GPIO16   I2C_SDA    ⚠ 2k2 PU         GPIO39  M1_ENC_A
+  GPIO17   I2C_SCL    ⚠ 2k2 PU         GPIO38  STATUS_LED  ⚠ RGB@IO38
   GPIO18   MUX_RST                     GPIO37  ── OCTAL PSRAM (R8)
   GPIO8    IR_EMIT                     GPIO36  ── OCTAL PSRAM (R8)
   GPIO3    ── strapping                GPIO35  ── OCTAL PSRAM (R8)
   GPIO46   ── strapping                GPIO0   ── BOOT / strapping
-  GPIO9    — SPARE                     GPIO45  ── strapping (VDD_SPI)
-  GPIO10   IMU_CS    FSPICS0           GPIO48  STATUS_LED  onboard RGB
-  GPIO11   IMU_MOSI  FSPID             GPIO47  M2_ENC_A
-  GPIO12   IMU_SCLK  FSPICLK           GPIO21  M1_PWM      ⚠ pull-down
-  GPIO13   IMU_MISO  FSPIQ             GPIO20  ── USB D+
-  GPIO14   IMU_INT                     GPIO19  ── USB D-
-  5V                                   GND
+  GPIO9    SPARE      → J-EXP          GPIO45  ── strapping (VDD_SPI)
+  GPIO10   IMU_CS     FSPICS0          GPIO48  M1_DIR      ⚠ 10k PD
+  GPIO11   IMU_MOSI   FSPID            GPIO47  M2_ENC_A
+  GPIO12   IMU_SCLK   FSPICLK          GPIO21  M1_PWM      ⚠ 10k PD
+  GPIO13   IMU_MISO   FSPIQ            GPIO20  ── USB D+
+  GPIO14   IMU_INT                     GPIO19  ── USB D−
+  5V       ← BUCK#2                    GND
   GND                                  GND
 ```
 
@@ -616,7 +620,7 @@ Connector/part references used below: `CN1/CN2` motor+encoder, `J-PROX-L/R` prox
 
 | Pin | DRV1 (Motor 1) | DRV2 (Motor 2) |
 |---|---|---|
-| IN1 | GPIO38 M1_DIR | GPIO42 M2_DIR |
+| IN1 | **GPIO48** M1_DIR | GPIO42 M2_DIR |
 | IN2 | GPIO21 M1_PWM | GPIO41 M2_PWM |
 | VREF | 3V3 | 3V3 |
 | VM | **12 V** (BUCK#1) | 12 V |
@@ -699,6 +703,28 @@ downstream segment needs its own pair. All ToFs keep address `0x29`; that is the
 
 `GPIO8 → 100 Ω → Q1 gate` · `Q1 gate → 10k → GND` (holds beacon OFF at boot) · `Q1 source → GND` ·
 `Q1 drain → TSAL6400 cathode` · `TSAL6400 anode → 33 Ω → 5 V`. ≈110 mA peak vs ~9 mA today.
+
+#### Spare pins and expansion connectors
+
+Only **two** GPIO are genuinely free, so route both rather than leaving them stranded on the socket.
+
+| Connector | Pins | Carries | Why |
+|---|---|---|---|
+| **J-EXP** | 4 | 1 = **GPIO4** (ADC1_3) · 2 = **GPIO9** (ADC1_8) · 3 = 3V3 · 4 = GND | The only two free GPIO. Both ADC-capable, so either can take an analogue input (thermistor, third current sense) or serve as digital I/O |
+| **J-CONSOLE** | 3 | 1 = GND · 2 = **GPIO43** U0TXD · 3 = **GPIO44** U0RXD | Fallback serial console. micro-ROS runs over native USB, so UART0 stays free for debugging |
+| **J-I2C** | 4 | 1 = 3V3 · 2 = GND · 3 = SDA · 4 = SCL | Bench header on the **upstream** bus. Doubles as the temporary-OLED port that replaced the deleted SSD1306 (§9) |
+| **J-TOF7** | 4 | mux channel 7, unpopulated | Spare ToF channel |
+
+⚠ **The real expansion path is the mux, not GPIO.** Anything I²C — more ToFs, another INA226, an
+environmental sensor — costs **zero pins** behind the TCA9548A or on the upstream bus. Plan growth
+that way and the two spare GPIO stay available for things that genuinely need a dedicated pin
+(an interrupt, a chip select, an enable line).
+
+If GPIO ever does run out, the escape valve is moving the **BNO086 from SPI to I²C**, which frees
+GPIO10–13 (four pins) at the cost of sharing the bus.
+
+**One optional use for GPIO9:** wire it to the INA226 `ALERT` output for a hardware over-current or
+under-voltage trip that does not depend on firmware polling.
 
 #### U-AMP1 / U-AMP2 — motor current sense (one dual op-amp, e.g. MCP6002)
 
@@ -1270,7 +1296,9 @@ Add:
 | **Current-sense amplifier** | 2 | **§4.** One per DRV8870 ISEN — turns stall detection from a heuristic into a measurement |
 | TCA9548A / PCA9548A, TSSOP-24 | 1 | **TI or NXP part — reject PW548A clones** |
 | 4-pin JST connectors (ToF) | 8 | one per mux channel, for the **VL53L0X already in hand** (§9) |
-| Keyed I²C bench header | 1 | doubles as the temporary-OLED port (§9) |
+| Keyed I²C bench header (J-I2C) | 1 | doubles as the temporary-OLED port (§9) |
+| **J-EXP header, 4-pin** | 1 | §3.3 — GPIO4 + GPIO9 + 3V3 + GND, the only free GPIO |
+| **J-CONSOLE header, 3-pin** | 1 | §3.3 — UART0 fallback console |
 | **ESP32-S3-DevKitC-1** | 1 | §3.2. Socketed. Any flash size; **N16R8 is fine** — the §3.1 map avoids GPIO33–37, so its PSRAM simply goes unused |
 | **Female headers, 2 × 22, machined-pin** | 2 | §3.2 — machined not stamped; this board vibrates |
 | 3-pin connectors (prox) | 2 | 12 V, keyed |
