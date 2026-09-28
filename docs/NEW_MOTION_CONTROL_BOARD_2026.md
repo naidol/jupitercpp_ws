@@ -1850,10 +1850,13 @@ Add on the 12 V rail, **near the drivers** (motor-driver sheet, not the PSU shee
 | Part | Spec | LCSC |
 |---|---|---|
 | **TVS clamp** | **SMBJ15A**, unidirectional, SMB (DO-214AA). Standoff 15 V, breakdown 16.7–18.5 V, clamp **24.4 V** @ 24.6 A, 600 W peak. **Cathode (banded) → +12 V, anode → GND** | **`C699013`** (YANGJIE) or `C1979382` (Vishay) |
-| **Bulk electrolytic** | **470 µF**, **35 V** (not 220 µF — see energy check below) | confirm can size when ordering |
+| **Bulk electrolytic** | **470 µF**, **35 V** (not 220 µF — see energy check below). KNSCHA `KAT1V471M10100PDT`, SMD can **D10 × L10.5 mm** | **`C55348734`** |
 
-**DRAWN 2026-09-28** on `motor_controller.kicad_sch` as **`D8`** (TVS) and **`C39`** (bulk), both on
-`+12V` / `GND`. Footprints `Diode_SMD:D_SMB_Handsoldering` and `Capacitor_SMD:CP_Elec_10x10.5`.
+**DRAWN AND PLACED 2026-09-28** on `motor_controller.kicad_sch` as **`D8`** (TVS) and **`C39`**
+(bulk), both on `+12V` / `GND`. Footprints `Diode_SMD:D_SMB_Handsoldering` and
+`JLCImport:KAT1V471M10100PDT`. Board positions **`D8` (67.7, 76.1)** — 10 mm from the DRV8870 VM
+pins — and **`C39` (60.5, 39.5)**. Polarity confirmed from the netlist, not the drawing:
+`D8` pad 1 (K) → `+12V`, `C39` pad 1 (+) → `+12V`.
 
 ⚠ **`D8` was drawn BACKWARDS on the first attempt** — cathode on `GND`, anode on `+12V`. A
 unidirectional TVS in that orientation is a forward-biased diode straight across the 12 V rail: it
@@ -2050,7 +2053,7 @@ choices — neither would be sensible for iron-only assembly.
 | Inductors, shielded | 3 | 6.8 µH (#1, sat ≥ 1.5× peak motor current), 22 µH ×2 |
 | Buck passives (caps, FB dividers, BST, COMP) | ~28 | see §11 |
 | **Ferrite bead** — TDK MPZ2012S601AT000, LCSC `C21519` | 1 | 0805, 600 Ω@100 MHz, 100 mΩ. Pi-filter on the BNO086 supply (§11) |
-| Bulk electrolytic **470 µF** / **35 V** — `C39` | 1 | 12 V rail, motor regen (§11). ~46 mm from the drivers by necessity — §11 explains why that is fine |
+| Bulk electrolytic **470 µF** / **35 V** — `C39` — KNSCHA `KAT1V471M10100PDT`, LCSC **`C55348734`** | 1 | 12 V rail, motor regen (§11). D10 × L10.5 mm can. ~46 mm from the drivers by necessity — §11 explains why that is fine |
 | **TVS SMBJ15A** — LCSC `C699013` — `D8` | 1 | 12 V rail regen clamp, 10 mm from the VM pins. ⚠ `A` not `CA`; **not** a Schottky; symbol is `Device:D_Zener` **not** `D_TVS` (§11) |
 | **MP2338** (SOT583) | 1 | §11 — buck #2, 3.3 V. ⚠ **V_ref 0.5 V**, not 0.8 V. Synchronous + COT: deletes a catch diode, a COMP network and an RT resistor |
 | ~~MP1584EN~~ | 0 | Superseded by MP2338 (§11) |
