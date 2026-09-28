@@ -1853,8 +1853,22 @@ Add on the 12 V rail, **near the drivers** (motor-driver sheet, not the PSU shee
 | **Bulk electrolytic** | **470 µF**, **35 V** (not 220 µF — see energy check below) | confirm can size when ordering |
 
 **DRAWN 2026-09-28** on `motor_controller.kicad_sch` as **`D8`** (TVS) and **`C39`** (bulk), both on
-`+12V` / `GND`, verified by connectivity trace. Footprints `Diode_SMD:D_SMB_Handsoldering` and
-`Capacitor_SMD:CP_Elec_10x10.5`.
+`+12V` / `GND`. Footprints `Diode_SMD:D_SMB_Handsoldering` and `Capacitor_SMD:CP_Elec_10x10.5`.
+
+⚠ **`D8` was drawn BACKWARDS on the first attempt** — cathode on `GND`, anode on `+12V`. A
+unidirectional TVS in that orientation is a forward-biased diode straight across the 12 V rail: it
+conducts at ~0.7 V and destroys itself and the rail on first power-up. It looked completely correct
+on the canvas; the symbol was rotated, and a rotated schematic symbol can render right and still net
+up reversed (the schematic file stores Y downward, the symbol library stores it upward).
+
+**Check polarity from the NETLIST, never from the drawing.** After *Update PCB from Schematic*:
+
+```bash
+grep -A40 '"Reference" "D8"' "Jupiter Robot 2026 v1.kicad_pcb" | grep -E '\(pad |\(net '
+```
+
+Pad 1 of `Device:D_Zener` is the **cathode** — if it reads `GND`, the part is backwards. The same
+check applies to `C39` (pad 1 is `+`). Correct state is `D8` pad 1 → `+12V`, `C39` pad 1 → `+12V`.
 
 ⚠ **Not a Schottky.** An SS34 (or any rectifier) is reverse-biased at 12 V and does nothing until
 its 40 V breakdown, where it is not avalanche-rated and simply fails. Different function entirely
